@@ -11,7 +11,7 @@ describe("runtime dependencies", () => {
 	it("has no dependencies declared at all", () => {
 		const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 		expect(pkg.dependencies ?? {}).toEqual({});
-		expect(pkg.private).toBe(true);
+		expect(pkg.private).toBeUndefined();
 	});
 
 	it("imports nothing outside node: builtins and relative paths", () => {

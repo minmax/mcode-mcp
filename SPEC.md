@@ -1,12 +1,11 @@
 # mcode-mcp — Specification
 
-Provisional local MCP server that delegates coding tasks to a **locally installed**
+MCP server that delegates coding tasks to a **locally installed**
 [MiniMax Code](https://agent.minimax.io/docs/cli/quick-start) CLI (`mcode`, npm
 `@minimax-ai/code`). Sibling of `kimi-cli-mcp` / `grok-cli-mcp` / `pi-cli-mcp` /
 `qwen-cli-mcp`: same architecture, same principles, different agent.
 
-Status: **0.1.0** local cut (git tag `v0.1.0`). `package.json` is
-`"private": true`. Not an npm publication. Behaviour: [CHANGELOG.md](CHANGELOG.md).
+Status: **0.1.0**. Behaviour: [CHANGELOG.md](CHANGELOG.md).
 
 Verified against installed `@minimax-ai/code` **0.3.11** at
 `/opt/homebrew/lib/node_modules/@minimax-ai/code` (`mcode` → `cli.js`), official
@@ -21,7 +20,7 @@ This is **not** the MiniMax M3 API provider in Pi, and **not** `mmx-cli`.
 
 | | |
 |---|---|
-| package | `mcode-mcp` 0.1.0 (private) |
+| package | `mcode-mcp` 0.1.0 |
 | bin | `mcode-mcp` |
 | MCP server name | `mcode` |
 | Tool prefix | `mcode_` |

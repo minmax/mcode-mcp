@@ -1,0 +1,12 @@
+#!/bin/sh
+# Fast checks only. Anything that takes real time belongs in pre-push.
+set -e
+
+npx biome check .
+
+npm install --package-lock-only --ignore-scripts --silent
+if ! git diff --quiet -- package-lock.json; then
+	echo "pre-commit: package-lock.json was out of date with package.json." >&2
+	echo "It has been regenerated — review and stage it, then commit again." >&2
+	exit 1
+fi

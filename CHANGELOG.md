@@ -1,12 +1,12 @@
 # Changelog
 
-What changed in behaviour. This package is local (`private: true`); dates are local cuts, not npm publishes.
+What changed in behaviour, in the order it shipped. Dates are publish dates from the registry.
 
 ## Unreleased
 
 ## 0.1.0 — 2026-09-10
 
-First local cut. Adapter over installed MiniMax Code CLI (`mcode` / `@minimax-ai/code` 0.3.11). Not MiniMax M3 in Pi, not `mmx-cli`.
+First public release. Adapter over installed MiniMax Code CLI (`mcode` / `@minimax-ai/code` 0.3.11). Not MiniMax M3 in Pi, not `mmx-cli`.
 
 - **ACP is the default transport.** `mcode acp` unless the call (or `MCODE_MCP_TRANSPORT`) asks for `print` (`mcode exec --output-format stream-json`). A running ACP turn can be `abort`/`steer` via `session/cancel`; print has no mid-run channel.
 - **`follow_up` is an honest error.** MiniMax Code ACP does not document a mid-turn queue. Use `abort`/`steer` on a live ACP turn, or `mcode_reply` after it finishes.

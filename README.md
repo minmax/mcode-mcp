@@ -1,39 +1,66 @@
 # mcode-mcp
 
-Provisional **local** MCP server that delegates coding tasks to your **locally
-installed** [MiniMax Code](https://agent.minimax.io/docs/cli/quick-start) CLI
-(`mcode`, npm package `@minimax-ai/code`).
+MCP server that delegates coding tasks to your **locally installed**
+[MiniMax Code](https://agent.minimax.io/docs/cli/quick-start) CLI (`mcode`,
+npm package `@minimax-ai/code`).
 
 It wraps the real `mcode` binary instead of bundling its own copy of the agent,
 so every call inherits your MiniMax login, models and `~/.minimax` config.
 
-Local **0.1.0** (git tag `v0.1.0`). `package.json` is `"private": true`. Not on
-npm / GitHub. Do not publish unless a later task authorises it. Behaviour
-notes: [CHANGELOG.md](CHANGELOG.md). Design: [SPEC.md](SPEC.md).
-
 This is **not** the MiniMax M3 API provider in Pi, and **not** `mmx-cli`.
 
-Sibling architecture of `kimi-cli-mcp` / `grok-cli-mcp` / `pi-cli-mcp` /
-`qwen-cli-mcp` — same principles, MiniMax Code behind the wheel.
+Sibling of [pi-cli-mcp](https://www.npmjs.com/package/pi-cli-mcp),
+[qwen-cli-mcp](https://www.npmjs.com/package/qwen-cli-mcp),
+[kimi-cli-mcp](https://www.npmjs.com/package/kimi-cli-mcp) and
+[grok-code-mcp](https://www.npmjs.com/package/grok-code-mcp) — same architecture,
+same principles, MiniMax Code behind the wheel. Design: [SPEC.md](SPEC.md).
+Behaviour: [CHANGELOG.md](CHANGELOG.md).
 
 Verified against MiniMax Code **0.3.11**.
 
-## Requirements
-
-- Node ≥ 22 to run **this** server.
-- A working `mcode` on `PATH`. MiniMax Code itself requires Node `>=22.19 <23`
-  or `>=24 <27`, and its native SQLite module must match that Node ABI.
-- On this machine the Homebrew `mcode` shim uses `env node`. If `PATH` still
-  has Node 22.16, `mcode` will refuse to start. Point the adapter at a matching
-  runtime without changing global config:
+## Install
 
 ```bash
-export MCODE_MCP_BIN=/opt/homebrew/lib/node_modules/@minimax-ai/code/cli.js
-export MCODE_MCP_WRAP=/path/to/node-22.22+/bin/node
+npx -y mcode-mcp         # no install
+npm install -g mcode-mcp # or global
+```
+
+Requires Node ≥ 22 and a working `mcode` on `PATH` (`npm i -g @minimax-ai/code`).
+MiniMax Code itself needs Node `>=22.19 <23` or `>=24 <27`, and its native
+SQLite module must match that Node ABI. If `mcode` refuses to start, point the
+adapter at the CLI and a matching Node without changing global PATH:
+
+```bash
+export MCODE_MCP_BIN=/path/to/@minimax-ai/code/cli.js
+export MCODE_MCP_WRAP=/path/to/node
 ```
 
 `MCODE_MCP_WRAP` is a command prefix (no shell interpolation). The process is
 spawned as `node cli.js <args…>`.
+
+### Claude Code
+
+```bash
+claude mcp add-json mcode -s user '{
+  "type": "stdio",
+  "command": "npx",
+  "args": ["-y", "mcode-mcp"],
+  "timeout": 3600000
+}'
+```
+
+### Any other MCP client
+
+```json
+{
+  "mcpServers": {
+    "mcode": { "command": "npx", "args": ["-y", "mcode-mcp"] }
+  }
+}
+```
+
+Keep the server name short (`mcode`): it becomes part of the tool names your
+model sees.
 
 ## Tools
 
@@ -105,15 +132,11 @@ Items are `user` / `assistant` / `tool` / `gap`. Thinking and image binaries are
 omitted. Pass `cursor` from the previous page to continue; `include_tools: false`
 hides tool calls/results but still advances the cursor.
 
-## Local build
+## Source
 
 ```bash
-cd /Users/pavel.karataev/ai/mcode-mcp
-npm install
+git clone https://github.com/minmax/mcode-mcp.git
+cd mcode-mcp
+npm ci
 npm test
-npm run build
 ```
-
-Point an MCP client at `dist/index.js`. This package is not on npm; do not
-`npm publish`. Codex on this machine is already wired to that path with
-`MCODE_MCP_BIN` / `MCODE_MCP_WRAP` as above.
