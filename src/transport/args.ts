@@ -1,0 +1,31 @@
+import type { RunPlan } from "./types.ts";
+
+/**
+ * `mcode exec` headless flags. Prompt is last after `--` so a leading dash in
+ * the task text cannot be parsed as an option. argv is a string array — no shell.
+ */
+export function printArgs(plan: RunPlan): string[] {
+	const { overrides } = plan;
+	const args: string[] = ["exec", "--output-format", "stream-json", "--cwd", plan.cwd];
+	if (overrides.permission) args.push("--permission", overrides.permission);
+	if (overrides.model) args.push("--model", overrides.model);
+	if (plan.resume) args.push("--session", plan.sessionId);
+	if (plan.timeoutMs !== undefined) args.push("--timeout", `${plan.timeoutMs}ms`);
+	args.push("--", plan.prompt);
+	return args;
+}
+
+export function agentArgs(): string[] {
+	return ["acp"];
+}
+
+export function modelsArgs(): string[] {
+	return ["provider", "list", "--json"];
+}
+
+/** ACP `permissionMode` config values. `off` is exec-only. */
+export function acpPermissionMode(permission: string | undefined): "auto" | "bypassPermissions" | undefined {
+	if (permission === "smart") return "auto";
+	if (permission === "full") return "bypassPermissions";
+	return undefined;
+}

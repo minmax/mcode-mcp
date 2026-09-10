@@ -1,0 +1,16 @@
+node_modules/
+*.log
+.DS_Store
+dist/
+*.tgz
+*.tsbuildinfo
+
+.env
+.env.*
+!.env.example
+.npmrc
+.local/
+sessions/
+state/
+*.jsonl
+docs/LIVE_RECEIPT.md

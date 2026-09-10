@@ -1,0 +1,48 @@
+{
+	"name": "mcode-mcp",
+	"private": true,
+	"version": "0.1.0",
+	"description": "Local MCP server that delegates coding tasks to the installed MiniMax Code CLI (mcode). Wraps the real mcode binary instead of bundling the agent. Not published to npm.",
+	"type": "module",
+	"bin": {
+		"mcode-mcp": "dist/index.js"
+	},
+	"main": "dist/index.js",
+	"files": [
+		"dist",
+		"README.md",
+		"CHANGELOG.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"build": "tsc -p tsconfig.build.json && chmod +x dist/index.js",
+		"clean": "rm -rf dist",
+		"check": "npm run check:format && npm run check:types && npm test",
+		"check:format": "biome check .",
+		"check:types": "tsc --noEmit -p tsconfig.json",
+		"fix": "biome check --write .",
+		"test": "vitest run --typecheck",
+		"test:live": "MCODE_CLI_MCP_LIVE=1 vitest run --config ./vitest.config.ts test/live.test.ts",
+		"test:watch": "vitest --typecheck"
+	},
+	"engines": {
+		"node": ">=22"
+	},
+	"keywords": [
+		"mcp",
+		"model-context-protocol",
+		"mcode",
+		"minimax-code",
+		"coding-agent",
+		"subagent",
+		"delegation"
+	],
+	"author": "Karataev Pavel (https://github.com/minmax)",
+	"license": "MIT",
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.9",
+		"@types/node": "^24.0.0",
+		"typescript": "^7.0.2",
+		"vitest": "^4.1.11"
+	}
+}
