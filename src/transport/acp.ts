@@ -13,6 +13,8 @@
 import { INIT_TIMEOUT_MS, SERVER_INFO } from "../config.ts";
 import type { McodeHandle, RunResult } from "../mcode-process.ts";
 import { runMcode } from "../mcode-process.ts";
+import { ConfigEditError, contextWindowModelId, withContextWindow } from "../minimax-config.ts";
+import { parseModelTarget, resolveAcpModelTarget } from "../model-ref.ts";
 import { asRecord } from "../parse.ts";
 import type { CallContext } from "../types.ts";
 import { acpPermissionMode, agentArgs } from "./args.ts";
@@ -277,139 +279,234 @@ export const acpTransport: Transport = {
 	acceptsMidRunMessages: true,
 
 	async run(plan: RunPlan, ctx: CallContext, onEvent: (event: unknown) => void): Promise<RunResult> {
-		const args = agentArgs();
-		let handle: McodeHandle | undefined;
-		let client: AcpClient | undefined;
+		const startProcess = (): Promise<RunResult> => spawnRun(plan, ctx, onEvent);
 
-		const running = runMcode(args, plan.cwd, {
-			token: ctx.token,
-			timeoutMs: plan.timeoutMs,
-			stdin: "pipe",
-			gracefulStop: () => {
-				if (client?.id)
-					handle?.send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId: client.id } });
-			},
-			onStart: (mcodeHandle) => {
-				handle = mcodeHandle;
-				client = new AcpClient(mcodeHandle, onEvent, plan);
-			},
-			onEvent: (event) => {
-				client?.handleLine(event);
-			},
-		}).finally(() => {
-			client?.detachLive();
-			client?.rejectAll("the mcode process exited before replying");
-		});
+		const wanted = plan.overrides.context_window;
+		if (wanted === undefined) return startProcess();
 
-		try {
-			if (!client || !handle) {
-				const ready = await Promise.race([
-					running.then(() => false),
-					new Promise<boolean>((resolve) => {
-						const check = (): void => {
-							if (client && handle) resolve(true);
-							else setTimeout(check, 5);
-						};
-						check();
-					}),
-				]);
-				if (!ready || !client) {
-					const result = await running;
-					return { ...result, protocolError: "the mcode process exited before the ACP handshake" };
-				}
-			}
+		// Measured on 0.5.8: a context window set this way does not take effect
+		// over ACP. The session selection built from an advertised model value
+		// carries provider, model and variant but no context limit, so the turn
+		// falls back to `defaultModelContextWindow` from the config no matter what
+		// this file says. Holding the user's shared config for a whole turn would
+		// therefore cost a lot and buy nothing.
+		if (process.env.MCODE_MCP_ALLOW_ACP_CONTEXT_WINDOW !== "1") {
+			throw new ConfigEditError(
+				"context_window cannot be set on the acp transport. MiniMax Code builds a session " +
+					"selection from the advertised model value, and that selection carries no context " +
+					"limit, so the turn falls back to the context window in your config whatever this " +
+					"server writes there. Use transport: 'print', which hands mcode a private --config " +
+					"copy and does take effect. Nothing was written to your config. Set " +
+					"MCODE_MCP_ALLOW_ACP_CONTEXT_WINDOW=1 to edit the shared config anyway — it will " +
+					"hold the entry for the whole run and, until minimax-code#384 lands, still have no " +
+					"effect.",
+			);
+		}
 
-			try {
-				await waitFor(
-					client.request("initialize", {
-						protocolVersion: 1,
-						clientInfo: { name: SERVER_INFO.name, version: SERVER_INFO.version },
-						clientCapabilities: {},
-					}),
-					INIT_TIMEOUT_MS,
-					"the initialize handshake",
-				);
-			} catch (err) {
-				const detail = err instanceof Error ? err.message : String(err);
-				throw new Error(`mcode rejected the initialize handshake: ${detail}`);
-			}
+		// Escape hatch, not a supported path. `mcode acp` has no --config, so the
+		// only lever is the shared file, held under a cross-process lock for the
+		// whole run and rolled back compare-and-swap afterwards.
+		const modelId = contextWindowModelId(plan.overrides.model);
+		if (modelId === null) {
+			throw new ConfigEditError(
+				"context_window needs to know which model to apply it to, but the configured default model " +
+					"could not be read from MiniMax Code's config.yaml. Pass `model` explicitly, or set " +
+					"MCODE_MCP_MINIMAX_CONFIG to the config's absolute path.",
+			);
+		}
 
-			let sessionId: string;
-			if (plan.resume) {
-				await waitFor(
-					client.request("session/load", {
-						sessionId: plan.sessionId,
-						cwd: plan.cwd,
-						mcpServers: [],
-					}),
-					INIT_TIMEOUT_MS,
-					"session/load",
-				);
-				sessionId = plan.sessionId;
-			} else {
-				const created = await waitFor(
-					client.request("session/new", {
-						cwd: plan.cwd,
-						mcpServers: [],
-						...(plan.overrides.add_dirs ? { additionalDirectories: plan.overrides.add_dirs } : {}),
-					}),
-					INIT_TIMEOUT_MS,
-					"session/new",
-				);
-				const reported = created.sessionId;
-				if (typeof reported !== "string" || reported === "") {
-					throw new Error("session/new did not return a sessionId");
-				}
-				sessionId = reported;
-				plan.onSessionId?.(sessionId);
-			}
-
-			const mode = plan.overrides.mode ?? "default";
-			await client.request("session/set_mode", { sessionId, modeId: mode });
-
-			const permissionMode = acpPermissionMode(plan.overrides.permission);
-			if (permissionMode) {
-				await client.request("session/set_config_option", {
-					sessionId,
-					configId: "permissionMode",
-					value: permissionMode,
-				});
-			}
-
-			if (plan.overrides.model) {
-				await client.request("session/set_config_option", {
-					sessionId,
-					configId: "model",
-					value: plan.overrides.model,
-				});
-			}
-			if (plan.overrides.thinking_effort) {
-				await client.request("session/set_config_option", {
-					sessionId,
-					configId: "thinkingEffort",
-					value: plan.overrides.thinking_effort,
-				});
-			}
-
-			client.attachLive(sessionId);
+		const run = await withContextWindow(modelId, wanted, startProcess);
+		if (run.skipped) {
 			onEvent({
 				type: "system",
 				subtype: "init",
-				session_id: sessionId,
-				model: plan.overrides.model,
-				cwd: plan.cwd,
+				note:
+					`context_window: ${modelId} was changed by something else while this run was in flight, ` +
+					"so the config entry was left as it is now found.",
 			});
-
-			await client.startPrompt(plan.prompt);
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			client?.rejectAll(message);
-			handle?.kill("SIGTERM");
-			const result = await running;
-			return { ...result, protocolError: message, ...(client?.id ? { sessionId: client.id } : {}) };
 		}
-
-		const result = await running;
-		return { ...result, ...(client?.id ? { sessionId: client.id } : {}) };
+		return run.value;
 	},
 };
+
+function spawnRun(plan: RunPlan, ctx: CallContext, onEvent: (event: unknown) => void): Promise<RunResult> {
+	const args = agentArgs();
+	let handle: McodeHandle | undefined;
+	let client: AcpClient | undefined;
+
+	const running = runMcode(args, plan.cwd, {
+		token: ctx.token,
+		timeoutMs: plan.timeoutMs,
+		stdin: "pipe",
+		gracefulStop: () => {
+			if (client?.id) handle?.send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId: client.id } });
+		},
+		onStart: (mcodeHandle) => {
+			handle = mcodeHandle;
+			client = new AcpClient(mcodeHandle, onEvent, plan);
+		},
+		onEvent: (event) => {
+			client?.handleLine(event);
+		},
+	}).finally(() => {
+		client?.detachLive();
+		client?.rejectAll("the mcode process exited before replying");
+	});
+
+	return runAcpExchange(
+		plan,
+		running,
+		() => client,
+		() => handle,
+		onEvent,
+	);
+}
+
+async function runAcpExchange(
+	plan: RunPlan,
+	running: Promise<RunResult>,
+	pickClient: () => AcpClient | undefined,
+	pickHandle: () => McodeHandle | undefined,
+	onEvent: (event: unknown) => void,
+): Promise<RunResult> {
+	let client = pickClient();
+	let handle = pickHandle();
+	try {
+		// The client is created by runMcode's onStart callback, so it may not
+		// exist yet on the first line after the spawn. Poll the live accessors,
+		// not the local snapshot, or the wait never resolves.
+		if (!client || !handle) {
+			const ready = await Promise.race([
+				running.then(() => false),
+				new Promise<boolean>((resolve) => {
+					// The poll must stop as soon as either side of the race settles,
+					// or a process that dies during the handshake leaves this
+					// rescheduling itself forever.
+					let timer: NodeJS.Timeout | undefined;
+					const check = (): void => {
+						if (pickClient() && pickHandle()) resolve(true);
+						else timer = setTimeout(check, 5);
+					};
+					const stop = (): void => {
+						if (timer) clearTimeout(timer);
+					};
+					running.then(stop, stop);
+					check();
+				}),
+			]);
+			client = pickClient();
+			handle = pickHandle();
+			if (!ready || !client || !handle) {
+				const result = await running;
+				return { ...result, protocolError: "the mcode process exited before the ACP handshake" };
+			}
+		}
+
+		try {
+			await waitFor(
+				client.request("initialize", {
+					protocolVersion: 1,
+					clientInfo: { name: SERVER_INFO.name, version: SERVER_INFO.version },
+					clientCapabilities: {},
+				}),
+				INIT_TIMEOUT_MS,
+				"the initialize handshake",
+			);
+		} catch (err) {
+			const detail = err instanceof Error ? err.message : String(err);
+			throw new Error(`mcode rejected the initialize handshake: ${detail}`);
+		}
+
+		let sessionId: string;
+		// session/new and session/load both answer with the session's advertised
+		// configOptions. The model select is what turns a caller's
+		// `provider/model` into the opaque value this protocol actually accepts.
+		let configOptions: unknown;
+		if (plan.resume) {
+			const loaded = await waitFor(
+				client.request("session/load", {
+					sessionId: plan.sessionId,
+					cwd: plan.cwd,
+					mcpServers: [],
+				}),
+				INIT_TIMEOUT_MS,
+				"session/load",
+			);
+			configOptions = loaded.configOptions;
+			sessionId = plan.sessionId;
+		} else {
+			const created = await waitFor(
+				client.request("session/new", {
+					cwd: plan.cwd,
+					mcpServers: [],
+					...(plan.overrides.add_dirs ? { additionalDirectories: plan.overrides.add_dirs } : {}),
+				}),
+				INIT_TIMEOUT_MS,
+				"session/new",
+			);
+			const reported = created.sessionId;
+			if (typeof reported !== "string" || reported === "") {
+				throw new Error("session/new did not return a sessionId");
+			}
+			configOptions = created.configOptions;
+			sessionId = reported;
+			plan.onSessionId?.(sessionId);
+		}
+
+		const mode = plan.overrides.mode ?? "default";
+		await client.request("session/set_mode", { sessionId, modeId: mode });
+
+		const permissionMode = acpPermissionMode(plan.overrides.permission);
+		if (permissionMode) {
+			await client.request("session/set_config_option", {
+				sessionId,
+				configId: "permissionMode",
+				value: permissionMode,
+			});
+		}
+
+		if (plan.overrides.model) {
+			const target = parseModelTarget(plan.overrides.model);
+			if (target === null) {
+				throw new Error(
+					`model "${plan.overrides.model}" is not a provider/model reference. ` +
+						"Use mcode_models to see what this installation advertises.",
+				);
+			}
+			const resolved = resolveAcpModelTarget(target, configOptions);
+			if (!resolved.ok) throw new Error(resolved.message);
+			await client.request("session/set_config_option", {
+				sessionId,
+				configId: "model",
+				value: resolved.value,
+			});
+		}
+		if (plan.overrides.thinking_effort) {
+			await client.request("session/set_config_option", {
+				sessionId,
+				configId: "thinkingEffort",
+				value: plan.overrides.thinking_effort,
+			});
+		}
+
+		client.attachLive(sessionId);
+		onEvent({
+			type: "system",
+			subtype: "init",
+			session_id: sessionId,
+			model: plan.overrides.model,
+			cwd: plan.cwd,
+		});
+
+		await client.startPrompt(plan.prompt);
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		client?.rejectAll(message);
+		handle?.kill("SIGTERM");
+		const result = await running;
+		return { ...result, protocolError: message, ...(client?.id ? { sessionId: client.id } : {}) };
+	}
+
+	const result = await running;
+	return { ...result, ...(client?.id ? { sessionId: client.id } : {}) };
+}

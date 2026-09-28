@@ -16,7 +16,7 @@ Sibling of [pi-cli-mcp](https://www.npmjs.com/package/pi-cli-mcp),
 same principles, MiniMax Code behind the wheel. Design: [SPEC.md](SPEC.md).
 Behaviour: [CHANGELOG.md](CHANGELOG.md).
 
-Verified against MiniMax Code **0.3.11**.
+Verified against MiniMax Code **0.5.8**.
 
 ## Install
 
@@ -68,7 +68,8 @@ model sees.
 |---|---|
 | `mcode` | Start a session. Returns `[session: <id>]`, `[session-key: mcode:<id>]`, the result, and stats. |
 | `mcode_reply` | Continue a finished or interrupted session — including one killed by a timeout. |
-| `mcode_models` | List what `mcode provider list --json` reports. |
+| `mcode_models` | List the models this installation can actually run, from the session catalog. |
+| `mcode_context` | Read a session's context window, budget and per-component breakdown. |
 | `mcode_send` | Deliver into a turn executing right now (`abort` / `steer`). ACP only. |
 | `mcode_running` | List turns executing right now that `mcode_send` can reach. |
 | `mcode_sessions` | List known sessions started through this server, newest first. |
@@ -80,12 +81,42 @@ model sees.
 |---|---|
 | `prompt` | Required. Must be self-contained — mcode cannot see your conversation. |
 | `cwd` | Absolute path; defaults to this server's cwd. Passed as `--cwd` / ACP `cwd`. |
-| `model` | `--model provider/model` / ACP `session/set_config_option` id=`model`. |
+| `model` | `provider/model`, optionally `provider/model#variant`. On ACP the value is resolved against the session catalog automatically. |
 | `permission` | `smart` \| `full` \| `off`. Exec `--permission`. ACP maps `smart`→`auto`, `full`→`bypassPermissions`. `off` is exec-only. Server default is `full`. |
 | `mode` | ACP-only session mode: `default` \| `plan`. |
 | `thinking_effort` | ACP-only `session/set_config_option` id=`thinkingEffort`. Values are model-dependent. |
+| `context_window` | Context window in tokens (M3 / M3.1 advertise `512000` and `1000000`; the latter is marked `higher_usage`). See the note below. |
 | `transport` | `acp` (default) or `print`. Usually omit. |
 | `timeout_ms` | Wall clock for this run. Off unless you set it. Print also forwards `--timeout <N>ms`. |
+
+### `context_window`
+
+mcode exposes no flag and no ACP config option for the context window: the only
+way to reach it is the `minimaxModelContextLimits` entry in your own
+`~/.minimax/config.yaml`.
+
+**It works on `print` and is refused on `acp`.** On `print` this server writes a
+private copy of the config and passes `--config`, and the window verifiably
+takes effect. On `acp` it does not: MiniMax Code builds a session selection from
+the advertised model value, and that selection carries a provider, model and
+variant but no context limit, so the turn falls back to the window in your
+config however this server writes that file. Measured on 0.5.8 — asking for
+512000 with an explicit model, the session still reported 1,000,000. Since
+`mcode acp` has no `--config`, and the config path cannot be redirected without
+also moving the data directory, there is no way to make it work on that
+transport. Asking for it there is an error that says so, and nothing is written.
+
+Set `MCODE_MCP_ALLOW_ACP_CONTEXT_WINDOW=1` to edit the shared entry anyway: the
+server holds it for the whole run under a cross-process lock — which is judged
+stale by whether its owner process is alive, never by age — and rolls it back
+compare-and-swap, so a change by the TUI or by you wins, another instance's start
+will not disturb a run in flight, and a crash is repaired on the next start.
+Until [minimax-code#384](https://github.com/MiniMax-AI/minimax-code/issues/384)
+lands it will have no effect.
+
+mcode silently ignores a window the model does not advertise, so confirm the
+result with `mcode_context`. Only processes this call starts are affected, and a
+session that already exists keeps the window it was created with.
 
 **Not supported (honest error, not a fake flag):** `follow_up` on `mcode_send`,
 `effort`, `allowed_tools`, `system_prompt_append`, `permission=ask`.
@@ -94,7 +125,7 @@ model sees.
 mcode({
   prompt: "Read and execute the prompt: /abs/path/prompt.md",
   cwd: "/abs/path/to/repo",
-  model: "minimax_oauth/MiniMax-M2.5"
+  model: "minimax/MiniMax-M3.1-Flash-Preview"
 })
 
 // later:

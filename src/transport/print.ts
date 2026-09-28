@@ -6,6 +6,7 @@
 
 import type { RunResult } from "../mcode-process.ts";
 import { runMcode } from "../mcode-process.ts";
+import { contextWindowModelId, withTempContextConfig } from "../minimax-config.ts";
 import { asRecord, execUsage, formatModelRef, stringifyOutput } from "../parse.ts";
 import type { CallContext } from "../types.ts";
 import { printArgs } from "./args.ts";
@@ -16,31 +17,57 @@ export const printTransport: Transport = {
 	acceptsMidRunMessages: false,
 
 	async run(plan: RunPlan, ctx: CallContext, onEvent: (event: unknown) => void): Promise<RunResult> {
-		let sessionId: string | undefined;
+		const start = (configPath?: string): Promise<RunResult> => runPrint(plan, ctx, onEvent, configPath);
 
-		const result = await runMcode(printArgs(plan), plan.cwd, {
-			token: ctx.token,
-			timeoutMs: plan.timeoutMs,
-			onEvent: (raw) => {
-				const converted = convertExecLine(raw);
-				if (converted === null) return;
-				if (typeof converted.session_id === "string") {
-					sessionId = converted.session_id;
-					plan.onSessionId?.(sessionId);
-				}
-				onEvent(converted);
-			},
-		});
+		const wanted = plan.overrides.context_window;
+		if (wanted === undefined) return start();
 
-		if (sessionId === undefined && result.code === 0 && !result.timedOut && !result.cancelled) {
+		// exec takes --config, so a run with a context window of its own gets a
+		// private copy of the config instead of an edit to the user's own file.
+		const modelId = contextWindowModelId(plan.overrides.model);
+		if (modelId === null) {
+			throw new Error(
+				"context_window needs to know which model to apply it to, but the configured default model " +
+					"could not be read from MiniMax Code's config.yaml. Pass `model` explicitly, or set " +
+					"MCODE_MCP_MINIMAX_CONFIG to the config's absolute path.",
+			);
+		}
+		return withTempContextConfig(modelId, wanted, (configPath) => start(configPath));
+	},
+};
+
+function runPrint(
+	plan: RunPlan,
+	ctx: CallContext,
+	onEvent: (event: unknown) => void,
+	configPath: string | undefined,
+): Promise<RunResult> {
+	let sessionId: string | undefined;
+
+	const result = runMcode(printArgs({ ...plan, ...(configPath ? { configPath } : {}) }), plan.cwd, {
+		token: ctx.token,
+		timeoutMs: plan.timeoutMs,
+		onEvent: (raw) => {
+			const converted = convertExecLine(raw);
+			if (converted === null) return;
+			if (typeof converted.session_id === "string") {
+				sessionId = converted.session_id;
+				plan.onSessionId?.(sessionId);
+			}
+			onEvent(converted);
+		},
+	}).then((run) => {
+		if (sessionId === undefined && run.code === 0 && !run.timedOut && !run.cancelled) {
 			return {
-				...result,
+				...run,
 				protocolError: "print mode produced no sessionId — mcode did not name the session",
 			};
 		}
-		return { ...result, ...(sessionId ? { sessionId } : {}) };
-	},
-};
+		return { ...run, ...(sessionId ? { sessionId } : {}) };
+	});
+
+	return result;
+}
 
 function convertExecLine(raw: unknown): Record<string, unknown> | null {
 	const rec = asRecord(raw);

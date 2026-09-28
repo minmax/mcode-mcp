@@ -81,6 +81,14 @@ export interface RunOverrides {
 	permission?: Permission;
 	mode?: SessionMode;
 	thinking_effort?: string;
+	/**
+	 * Context window for this run, in tokens (the catalog advertises 512000 and
+	 * 1000000 for M3 / M3.1). Neither `mcode exec` nor `mcode acp` exposes this as
+	 * a flag or a config option, so it is applied by other means — see
+	 * minimax-config.ts. The values are therefore not validated against a fixed
+	 * enum: a model that gains a third option tomorrow should still work.
+	 */
+	context_window?: number;
 	add_dirs?: string[];
 }
 

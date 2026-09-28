@@ -7,7 +7,9 @@
 
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 const out = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
 const mode = process.env.FAKE_MODE ?? "answer";
@@ -27,7 +29,153 @@ function argValue(flag) {
 	return index === -1 ? undefined : argv[index + 1];
 }
 
+// A model catalog shaped like the one MiniMax Code advertises over ACP. The
+// values are opaque `m:<provider>:<model>:u|v:<variant>` strings, and
+// session/set_config_option rejects anything that is not one of them — which is
+// exactly what real mcode does, and what the adapter has to get right.
+const FAKE_MODEL = process.env.FAKE_MODEL_ID ?? "FakeModel-Fast";
+const FAKE_MODEL_ALT = "FakeModel-Pro";
+const FAKE_BASE_CONTEXT = Number(process.env.FAKE_BASE_CONTEXT ?? 512_000);
+
+function fakeConfigOptions() {
+	if (mode === "no_models") {
+		return [
+			{ id: "permissionMode", type: "select", currentValue: "bypassPermissions", options: [] },
+			{ id: "model", type: "select", currentValue: undefined, options: [] },
+		];
+	}
+	return [
+		{
+			id: "permissionMode",
+			type: "select",
+			name: "Permission mode",
+			currentValue: "bypassPermissions",
+			options: [
+				{ value: "default", name: "Ask" },
+				{ value: "auto", name: "Auto" },
+				{ value: "bypassPermissions", name: "Full access" },
+			],
+		},
+		{
+			id: "model",
+			type: "select",
+			name: "Model",
+			currentValue: `m:minimax:${FAKE_MODEL}:v:thinking`,
+			// Mirrors 0.5.8: a model with a non-empty supportedVariants list is
+			// advertised only as `:v:<variant>`, never with the bare `:u` form.
+			options: [
+				{ value: `m:minimax:${FAKE_MODEL}:v:thinking`, name: `${FAKE_MODEL} · thinking` },
+				{ value: `m:minimax:${FAKE_MODEL_ALT}:v:thinking`, name: `${FAKE_MODEL_ALT} · thinking` },
+			],
+		},
+		{
+			id: "thinkingEffort",
+			type: "select",
+			name: "Thinking effort",
+			currentValue: "xhigh",
+			options: [
+				{ value: "default", name: "Default" },
+				{ value: "low", name: "Low" },
+				{ value: "medium", name: "Medium" },
+				{ value: "high", name: "High" },
+				{ value: "xhigh", name: "Xhigh" },
+				{ value: "max", name: "Max" },
+			],
+		},
+	];
+}
+
+// Mirror how MiniMax Code resolves the context window for a model: the
+// per-model override if the config carries one, otherwise the model's base.
+// The windows this model advertises. Real mcode applies an override only when
+// the value is in `contextWindowOptions`, and otherwise falls back to the
+// model's base context — so a fixture that accepted any integer would let a
+// silently-ignored value look like it worked.
+const FAKE_CONTEXT_OPTIONS = (process.env.FAKE_CONTEXT_OPTIONS ?? "512000,1000000")
+	.split(",")
+	.map((v) => Number(v.trim()))
+	.filter((v) => Number.isSafeInteger(v) && v > 0);
+
+function effectiveContextWindow() {
+	// `--config` is mcode's per-process runtime config and outranks everything,
+	// which is exactly what makes transport 'print' the path that works.
+	const fromFlag = argValue("--config");
+	const path = fromFlag && existsSync(fromFlag) ? fromFlag : fakeConfigPath();
+	if (path === undefined) return FAKE_BASE_CONTEXT;
+	let text;
+	try {
+		text = readFileSync(path, "utf8");
+	} catch {
+		return FAKE_BASE_CONTEXT;
+	}
+	const lines = text.split(/\r?\n/);
+	const start = lines.findIndex((line) => /^minimaxModelContextLimits:\s*$/.test(line));
+	if (start !== -1) {
+		for (let i = start + 1; i < lines.length; i += 1) {
+			const line = lines[i];
+			if (/^\S/.test(line)) break;
+			const match = /^\s+([^:#]+):\s*(\d+)\s*$/.exec(line);
+			if (match === null) continue;
+			if (match[1].replace(/^['"]|['"]$/g, "") !== FAKE_MODEL) continue;
+			const value = Number(match[2]);
+			// Out of the advertised set: ignored, as in 0.5.8.
+			return FAKE_CONTEXT_OPTIONS.includes(value) ? value : FAKE_BASE_CONTEXT;
+		}
+	}
+	// `defaultModelContextWindow` is what a session falls back to when the
+	// selection carries no context limit — which is every ACP selection.
+	const def = /^defaultModelContextWindow:\s*(\d+)\s*$/m.exec(text);
+	if (def !== null) {
+		const value = Number(def[1]);
+		if (FAKE_CONTEXT_OPTIONS.includes(value)) return value;
+	}
+	return FAKE_BASE_CONTEXT;
+}
+
+function fakeConfigPath() {
+	const explicit = process.env.MCODE_MCP_MINIMAX_CONFIG;
+	if (explicit) return existsSync(explicit) ? explicit : undefined;
+	const dataDir = process.env.MINIMAX_DATA_DIR;
+	if (dataDir) {
+		const candidate = join(dataDir, "config.yaml");
+		return existsSync(candidate) ? candidate : undefined;
+	}
+	const candidate = join(homedir(), ".minimax", "config.yaml");
+	return existsSync(candidate) ? candidate : undefined;
+}
+
 const mintSession = () => process.env.FAKE_SESSION_ID ?? `session_${randomUUID()}`;
+
+// A real session keeps its context snapshot across processes: /context works
+// from a later `mcode acp` that only did session/load. This fixture is spawned
+// per call, so "has this session run a turn" has to live on disk.
+const ranMarker = (id) => {
+	const state = process.env.MCODE_MCP_STATE;
+	if (!state) return null;
+	return join(state.replace(/\/[^/]*$/, ""), `.fake-ran-${String(id).replace(/[^\w-]/g, "_")}`);
+};
+const markExecSessionRan = (id, window) => {
+	const marker = ranMarker(id);
+	// The window is recorded with the session, the way a real one does: a later
+	// /context must report what the run actually had, not what the config says
+	// now. Recomputing it per read would make every "did the patch take effect"
+	// question unanswerable.
+	if (marker !== null) writeFileSync(marker, String(window ?? ""));
+};
+const sessionHasRun = (id) => {
+	const marker = ranMarker(id);
+	return marker !== null && existsSync(marker);
+};
+const sessionWindow = (id, fallback) => {
+	const marker = ranMarker(id);
+	if (marker === null) return fallback;
+	try {
+		const value = Number(readFileSync(marker, "utf8").trim());
+		return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+	} catch {
+		return fallback;
+	}
+};
 const sessionFromArgv = () => argValue("--session") ?? mintSession();
 
 function spawnMarkedChild() {
@@ -38,6 +186,9 @@ function spawnMarkedChild() {
 
 function emitExec(status, output, extra = {}) {
 	const id = sessionFromArgv();
+	// A headless run produces a real session with a real context snapshot, so a
+	// later mcode_context can read it — mark it the same way ACP does.
+	markExecSessionRan(id, effectiveContextWindow());
 	const runId = "run_fake";
 	const turnId = "turn_fake";
 	const base = { schemaVersion: 1, runId, sessionId: id, turnId, timestampMs: Date.now() };
@@ -217,6 +368,37 @@ if (argv[0] === "acp") {
 	process.exit(2);
 }
 
+function fakeModelValues() {
+	return fakeConfigOptions()
+		.find((option) => option.id === "model")
+		.options.map((option) => option.value);
+}
+
+// The budget report mirrors the shape of mcode's own /context output, including
+// a window taken from the config, so a test can prove a context_window override
+// actually reached the process.
+function fakeContextReport(modelValue, sessionId) {
+	const window = sessionHasRun(sessionId)
+		? sessionWindow(sessionId, effectiveContextWindow())
+		: effectiveContextWindow();
+	const used = 22_810;
+	const parts = String(modelValue).split(":");
+	const modelId = parts[2] ?? FAKE_MODEL;
+	return [
+		"Context: live",
+		`Model: minimax/${modelId}`,
+		`Budget: ${used.toLocaleString("en-US")} / ${window.toLocaleString("en-US")} tokens (${Math.round((used / window) * 100)}%)`,
+		"Compaction: never",
+		"Components:",
+		"- System prompt: 4,302 tokens",
+		"- Memory: 1,384 tokens",
+		"- Tools: 14,023 tokens",
+		"- Skills: 2,340 tokens",
+		"- Messages: 606 tokens",
+		"- Other: 155 tokens",
+	].join("\n");
+}
+
 async function runAcp() {
 	const stdinLog = process.env.FAKE_STDIN_LOG;
 	let sid = process.env.FAKE_SESSION_ID ?? mintSession();
@@ -225,6 +407,11 @@ async function runAcp() {
 	let abortTimer;
 	let promptId = null;
 	let promptCount = 0;
+	let currentModel = `m:minimax:${FAKE_MODEL}:v:thinking`;
+
+	// A real session keeps its context snapshot across processes: /context works
+	// from a later `mcode acp` that only did session/load. This fixture is
+	// spawned per call, so "has this session run a turn" has to live on disk.
 
 	const rpc = (id, result) => out({ jsonrpc: "2.0", id, result });
 	const rpcError = (id, message) => out({ jsonrpc: "2.0", id, error: { code: -32000, message } });
@@ -356,16 +543,29 @@ async function runAcp() {
 		}
 		if (msg.method === "session/new") {
 			sid = process.env.FAKE_SESSION_ID ?? mintSession();
-			rpc(msg.id, { sessionId: sid, configOptions: [] });
+			rpc(msg.id, { sessionId: sid, configOptions: fakeConfigOptions() });
 			return;
 		}
 		if (msg.method === "session/load") {
 			sid = msg.params?.sessionId ?? sid;
-			rpc(msg.id, { sessionId: sid, configOptions: [] });
+			rpc(msg.id, { sessionId: sid, configOptions: fakeConfigOptions() });
 			return;
 		}
-		if (msg.method === "session/set_mode" || msg.method === "session/set_config_option") {
+		if (msg.method === "session/set_mode") {
 			rpc(msg.id, {});
+			return;
+		}
+		if (msg.method === "session/set_config_option") {
+			const configId = msg.params?.configId;
+			const value = msg.params?.value;
+			// A model value must be one the session advertised. Accepting anything
+			// here would hide the very bug this fixture exists to catch.
+			if (configId === "model" && !fakeModelValues().includes(value)) {
+				rpcError(msg.id, `Invalid params: Invalid model config value: ${value}`);
+				return;
+			}
+			if (configId === "model") currentModel = value;
+			rpc(msg.id, { configOptions: fakeConfigOptions() });
 			return;
 		}
 		if (msg.method === "session/cancel") {
@@ -378,15 +578,26 @@ async function runAcp() {
 		if (msg.method === "session/prompt") {
 			promptCount += 1;
 			const text = Array.isArray(msg.params?.prompt) ? msg.params.prompt.map((b) => b.text ?? "").join("") : "";
+			if (text.trim() === "/context") {
+				// mcode only has a snapshot once a turn has actually run.
+				if (!sessionHasRun(sid)) {
+					settlePrompt(msg.id, "No Runtime context snapshot is available for this session yet.");
+					return;
+				}
+				settlePrompt(msg.id, fakeContextReport(currentModel, sid));
+				return;
+			}
 			if (mode === "wait") {
 				if (promptCount > 1) {
 					clearTimeout(abortTimer);
+					markExecSessionRan(sid, effectiveContextWindow());
 					settlePrompt(msg.id, `QUEUED TURN ANSWER: ${text}`);
 					return;
 				}
 				await playAcpScenario(msg.id);
 				return;
 			}
+			markExecSessionRan(sid, effectiveContextWindow());
 			await playAcpScenario(msg.id);
 		}
 	}

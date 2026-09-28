@@ -35,6 +35,7 @@ describe("handshake", () => {
 		const list = await client.call("tools/list");
 		expect(list.result.tools.map((t: { name: string }) => t.name).sort()).toEqual([
 			"mcode",
+			"mcode_context",
 			"mcode_history",
 			"mcode_models",
 			"mcode_reply",

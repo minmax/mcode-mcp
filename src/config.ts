@@ -39,8 +39,17 @@ export const TIMEOUT_MS = numEnvOrUndefined("MCODE_MCP_TIMEOUT_MS", 1_000);
 export const MAX_TIMEOUT_MS = numEnv("MCODE_MCP_MAX_TIMEOUT_MS", 86_400_000, 1_000);
 export const KILL_GRACE_MS = numEnv("MCODE_MCP_KILL_GRACE_MS", 5_000, 0);
 export const INTERRUPT_GRACE_MS = numEnv("MCODE_MCP_INTERRUPT_GRACE_MS", 5_000, 0);
-export const INIT_TIMEOUT_MS = numEnv("MCODE_MCP_INIT_TIMEOUT_MS", 15_000, 1_000);
-export const MODELS_TIMEOUT_MS = numEnv("MCODE_MCP_MODELS_TIMEOUT_MS", 60_000, 1_000);
+// A cold `mcode acp` start on this machine measured 3.6-21.8s for the
+// initialize handshake alone, against a 15s default that failed repeatedly.
+// The run path keeps 60s: a dead process there should not hang the call, and
+// the caller's own timeout_ms already bounds the run as a whole.
+export const INIT_TIMEOUT_MS = numEnv("MCODE_MCP_INIT_TIMEOUT_MS", 60_000, 1_000);
+// The two read-only tools spawn a process that does nothing but a cold start
+// and one query, and nothing else bounds them, so they can afford a far wider
+// margin: a false failure here is pure noise with no work lost. 120s is ~5x the
+// worst handshake seen, and still bounded.
+export const MODELS_TIMEOUT_MS = numEnv("MCODE_MCP_MODELS_TIMEOUT_MS", 120_000, 1_000);
+export const CONTEXT_TIMEOUT_MS = numEnv("MCODE_MCP_CONTEXT_TIMEOUT_MS", 120_000, 1_000);
 
 export const MAX_OUTPUT = process.env.MCODE_MCP_MAX_OUTPUT
 	? numEnv("MCODE_MCP_MAX_OUTPUT", 4_000_000, 1_000)

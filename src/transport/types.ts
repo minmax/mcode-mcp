@@ -10,6 +10,8 @@ export interface RunPlan {
 	prompt: string;
 	overrides: RunOverrides;
 	timeoutMs: number | undefined;
+	/** Print only: an explicit per-process config file, via `mcode exec --config`. */
+	configPath?: string;
 	onSessionId?: (id: string) => void;
 }
 

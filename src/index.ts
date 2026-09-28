@@ -6,9 +6,11 @@
 
 import { FALLBACK_PROTOCOL, KILL_GRACE_MS, MAX_FRAME, PROTOCOL_VERSIONS, SERVER_INFO } from "./config.ts";
 import { killAllTrees, makeCancelToken, treeCount } from "./mcode-process.ts";
+import { recoverPendingContextEdit } from "./minimax-config.ts";
 import { loadSessions } from "./sessions.ts";
 import {
 	callMcode,
+	callMcodeContext,
 	callMcodeHistory,
 	callMcodeModels,
 	callMcodeReply,
@@ -63,6 +65,7 @@ async function dispatchTool(
 	if (name === "mcode") return callMcode(args, ctx);
 	if (name === "mcode_reply") return callMcodeReply(args, ctx);
 	if (name === "mcode_models") return callMcodeModels(args, ctx);
+	if (name === "mcode_context") return callMcodeContext(args, ctx);
 	if (name === "mcode_send") return callMcodeSend(args);
 	if (name === "mcode_running") return callMcodeRunning();
 	if (name === "mcode_sessions") return callMcodeSessions();
@@ -198,6 +201,15 @@ process.stdout.on("error", (err: NodeJS.ErrnoException) => {
 });
 
 loadSessions();
+
+// Finish a context_window rollback that a previous crash interrupted, before
+// anything reads the config this server is about to make mcode use.
+try {
+	const recovered = recoverPendingContextEdit();
+	if (recovered !== null) process.stderr.write(`mcode-mcp: ${recovered}\n`);
+} catch (err) {
+	process.stderr.write(`mcode-mcp: could not check for an unclosed config edit: ${(err as Error).message}\n`);
+}
 
 let buffer = "";
 process.stdin.setEncoding("utf8");

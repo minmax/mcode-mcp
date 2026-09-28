@@ -109,16 +109,38 @@ describe("acp transport protocol", () => {
 		expect(methods).not.toContain("session/new");
 	});
 
-	it("sets the model via session/set_config_option", async () => {
+	// The catalog the fake advertises is provider `minimax` with models
+	// FakeModel-Fast and FakeModel-Pro, and its session/set_config_option rejects
+	// any value outside that list — so `provider/model` cannot be sent through.
+	it("sets the model as the advertised value, not the provider/model string", async () => {
 		const stdinLog = join(ws.dir, `stdin-model-${Date.now()}.log`);
 		const client = new Client({ ...ws.env, FAKE_STDIN_LOG: stdinLog }, ws.dir);
 		await client.handshake();
-		await client.tool("mcode", { prompt: "go", cwd: ws.dir, model: "minimax_oauth/MiniMax-M2.5" });
+		const res = await client.tool("mcode", { prompt: "go", cwd: ws.dir, model: "minimax/FakeModel-Fast" });
 		client.close();
+		expect(res.isError).toBe(false);
+
 		const set = readStdinLog(stdinLog).find(
 			(line) => line.method === "session/set_config_option" && line.params?.configId === "model",
 		);
-		expect(set?.params?.value).toBe("minimax_oauth/MiniMax-M2.5");
+		// No `#variant`: the entry the session is already on for that model wins.
+		expect(set?.params?.value).toBe("m:minimax:FakeModel-Fast:v:thinking");
+	});
+
+	it("refuses a model the session never advertised instead of sending it", async () => {
+		const stdinLog = join(ws.dir, `stdin-model-missing-${Date.now()}.log`);
+		const client = new Client({ ...ws.env, FAKE_STDIN_LOG: stdinLog }, ws.dir);
+		await client.handshake();
+		const res = await client.tool("mcode", { prompt: "go", cwd: ws.dir, model: "minimax_oauth/MiniMax-M2.5" });
+		client.close();
+
+		expect(res.isError).toBe(true);
+		expect(res.text).toContain("mcode did not advertise minimax_oauth/MiniMax-M2.5");
+		expect(res.text).toContain("minimax/FakeModel-Fast");
+		const modelSets = readStdinLog(stdinLog).filter(
+			(line) => line.method === "session/set_config_option" && line.params?.configId === "model",
+		);
+		expect(modelSets).toEqual([]);
 	});
 });
 

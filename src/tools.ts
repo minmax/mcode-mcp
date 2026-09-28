@@ -1,6 +1,7 @@
 // Tool schemas and their implementations.
 
 import { existsSync, statSync } from "node:fs";
+import { withAcpQuery } from "./acp-query.ts";
 import type { Accumulator } from "./answer.ts";
 import {
 	accumulate,
@@ -14,6 +15,7 @@ import {
 	tailStderr,
 } from "./answer.ts";
 import {
+	CONTEXT_TIMEOUT_MS,
 	DEFAULT_MODEL,
 	DEFAULT_PERMISSION,
 	MAX_PROMPT,
@@ -30,11 +32,11 @@ import {
 	readMcodeHistory,
 } from "./history.ts";
 import type { RunResult } from "./mcode-process.ts";
-import { runMcode, withSlot } from "./mcode-process.ts";
-import { asRecord } from "./parse.ts";
+import { withSlot } from "./mcode-process.ts";
+import { ConfigEditError } from "./minimax-config.ts";
+import { acpModelOptions, acpSelects, decodeAcpModelValue, formatModelRef } from "./model-ref.ts";
 import { getSession, listSessions, rememberSession, withSessionLock } from "./sessions.ts";
 import { findTranscript, statKey } from "./transcript.ts";
-import { modelsArgs } from "./transport/args.ts";
 import type { RunPlan, Transport } from "./transport/index.ts";
 import { getRun, listRuns, resolveTransport, TRANSPORT_NAMES } from "./transport/index.ts";
 import type {
@@ -71,8 +73,9 @@ const SHARED_PROPS = {
 	model: {
 		type: "string",
 		description:
-			"Model as MiniMax Code expects it: provider/model, e.g. 'minimax_oauth/MiniMax-M2.5'. " +
-			"Defaults to mcode's own default. mcode_models lists what provider list --json reported.",
+			"Model as provider/model, e.g. 'minimax/MiniMax-M3.1-Flash-Preview'. Append '#variant' to pin one, " +
+			"e.g. 'minimax/MiniMax-M3#thinking'; without it the model's current variant is kept. " +
+			"Defaults to mcode's own default. mcode_models lists what this installation advertises.",
 	},
 	permission: {
 		type: "string",
@@ -92,6 +95,18 @@ const SHARED_PROPS = {
 		type: "string",
 		description:
 			"ACP-only session/set_config_option id=thinkingEffort. Values are model-dependent; print has no equivalent flag.",
+	},
+	context_window: {
+		type: "integer",
+		minimum: 1,
+		description:
+			"Context window for this run, in tokens. The catalog advertises 512000 and 1000000 for M3 / M3.1, " +
+			"and 1000000 is the one marked higher_usage. Requires transport: 'print' — it hands mcode a " +
+			"private config via --config and verifiably takes effect. On 'acp' this is refused: MiniMax Code " +
+			"builds a session selection that carries no context limit, so there the value cannot take effect " +
+			"however it is set. mcode silently ignores a window the model does not advertise, so confirm the " +
+			"result with mcode_context. Only processes this call starts are affected; a session that already " +
+			"exists keeps the window it was created with.",
 	},
 	transport: {
 		type: "string",
@@ -171,9 +186,11 @@ export const TOOLS: ToolDefinition[] = [
 	{
 		name: "mcode_models",
 		description:
-			"List what this MiniMax Code installation reports via `mcode provider list --json`. " +
-			"Use it to pick a `model` value for `mcode` / `mcode_reply`. Starts no task. Official OAuth " +
-			"providers may list zero models even when a default model is configured.",
+			"List the models this MiniMax Code installation can actually run, taken from the session's " +
+			"advertised catalog rather than from the credential list (`mcode provider list --json` reports an " +
+			"empty model set under a Token Plan login, so it cannot answer this). Each row is the " +
+			"`provider/model` to pass to `mcode` / `mcode_reply`, plus the variant suffix and label. " +
+			"Starts no task.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -182,6 +199,29 @@ export const TOOLS: ToolDefinition[] = [
 					description: "Optional substring filter on provider or model id.",
 				},
 			},
+			additionalProperties: false,
+		},
+		annotations: LIVE_LISTING,
+	},
+	{
+		name: "mcode_context",
+		description:
+			"Report the context window and budget of an mcode session: total window, tokens used, how full " +
+			"that is, whether compaction has run, and the per-component breakdown (system prompt, memory, " +
+			"tools, skills, messages). Read-only: it opens the session, asks MiniMax Code's own /context " +
+			"report and closes again, so it neither runs a task nor changes the turn. " +
+			"The session must have completed at least one turn — a session that has never run has no " +
+			"snapshot to report. Use it to find out what a session's `context_window` actually came out as, " +
+			"since that value is chosen by mcode rather than returned by the call that set it.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				session: {
+					type: "string",
+					description: "Session id, as printed in the [session: <id>] prefix of an mcode answer.",
+				},
+			},
+			required: ["session"],
 			additionalProperties: false,
 		},
 		annotations: LIVE_LISTING,
@@ -363,6 +403,13 @@ function readOverrides(input: Record<string, unknown>, transportName: string): R
 		}
 		overrides.thinking_effort = thinking;
 	}
+	const contextWindow = input.context_window;
+	if (contextWindow !== undefined && contextWindow !== null) {
+		if (typeof contextWindow !== "number" || !Number.isSafeInteger(contextWindow) || contextWindow < 1) {
+			throw new Error("context_window must be a whole number of tokens, at least 1");
+		}
+		overrides.context_window = contextWindow;
+	}
 	if (input.add_dirs !== undefined && input.add_dirs !== null) {
 		if (transportName === "print") {
 			throw new Error("add_dirs is ACP-only; mcode exec has no --add-dir flag");
@@ -429,10 +476,22 @@ function announceStart(ctx: CallContext, id: string, cwd: string, model?: string
 async function invokeMcode(transport: Transport, plan: RunPlan, ctx: CallContext): Promise<Outcome> {
 	const acc = newAccumulator();
 	const started = Date.now();
-	const result = await transport.run(plan, ctx, (event) => {
-		const note = accumulate(acc, event);
-		if (note && ctx.progress) ctx.progress(note);
-	});
+	let result: RunResult;
+	try {
+		result = await transport.run(plan, ctx, (event) => {
+			const note = accumulate(acc, event);
+			if (note && ctx.progress) ctx.progress(note);
+		});
+	} catch (err) {
+		// A refused context-window edit is a decision about the user's config,
+		// not a defect in this adapter. Surfacing it as an internal error with a
+		// stack trace would be both alarming and wrong.
+		if (err instanceof ConfigEditError) {
+			result = { code: 1, stdout: "", stderr: "", protocolError: err.message };
+		} else {
+			throw err;
+		}
+	}
 	acc.capturedBytes = result.stdout.length;
 	return { acc, result, elapsedMs: Date.now() - started };
 }
@@ -606,95 +665,106 @@ export async function callMcodeModels(input: Record<string, unknown>, ctx: CallC
 		return toolResult("mcode_models: `search` must be a string.", true);
 	}
 
-	const result = await withSlot(() =>
-		runMcode(modelsArgs(), process.cwd(), {
-			token: ctx.token,
-			timeoutMs: MODELS_TIMEOUT_MS,
-		}),
-	);
-
-	if (result.cancelled) return toolResult("mcode_models was cancelled.", true);
-
-	if (result.code !== 0) {
-		return toolResult(
-			`mcode_models could not read the model catalog from mcode (exit code ${result.code}).` +
-				(result.stderr
-					? `\n\n${tailStderr(result.stderr)}`
-					: result.stdout
-						? `\n\n${tailStderr(result.stdout)}`
-						: ""),
-			true,
-		);
-	}
-
-	let parsed: unknown;
+	// `mcode provider list --json` describes *configured credentials*, and under a
+	// Token Plan login it reports an empty `models` array for every provider — so
+	// it cannot answer "which models can I pick". The session's advertised
+	// configOptions can, and are the values ACP actually accepts, so read those.
+	let configOptions: unknown;
 	try {
-		parsed = JSON.parse(result.stdout);
-	} catch {
+		const query = await withSlot(() =>
+			withAcpQuery(ctx, process.cwd(), MODELS_TIMEOUT_MS, async (session) => {
+				const created = await session.newSession();
+				return created.configOptions;
+			}),
+		);
+		configOptions = query.value;
+	} catch (err) {
 		return toolResult(
-			`mcode_models could not parse the model catalog from mcode.` +
-				(result.stdout.trim() ? `\n\n${tailStderr(result.stdout)}` : " mcode printed nothing."),
+			`mcode_models could not read the model catalog: ${err instanceof Error ? err.message : String(err)}`,
 			true,
 		);
 	}
 
-	const rec = asRecord(parsed);
-	const providers = rec && Array.isArray(rec.providers) ? rec.providers : null;
-	if (providers === null) {
+	const selects = acpSelects(configOptions);
+	const models = acpModelOptions(configOptions);
+	if (models.length === 0) {
 		return toolResult(
-			`mcode_models could not parse the model catalog from mcode.` +
-				(result.stdout.trim() ? `\n\n${tailStderr(result.stdout)}` : " mcode printed nothing."),
+			"mcode advertised no model options on a fresh session, so there is nothing to choose from. " +
+				"mcode's configured credential list is a separate, usually empty view — this is the catalog " +
+				"that actually drives model selection.",
 			true,
 		);
 	}
 
-	const source = typeof rec?.minimaxModelSource === "string" ? rec.minimaxModelSource : undefined;
 	const needle = search?.toLowerCase();
 	const lines: string[] = [];
-	let modelCount = 0;
+	let count = 0;
 
-	for (const raw of providers) {
-		const provider = asRecord(raw);
-		if (provider === null) continue;
-		const providerId = typeof provider.providerId === "string" ? provider.providerId : "unknown";
-		const name = typeof provider.name === "string" ? provider.name : providerId;
-		const active = provider.active === true;
-		const models = Array.isArray(provider.models) ? provider.models : [];
-		const header = `- ${providerId} (${name})${active ? " · active" : ""}`;
-		const modelLines: string[] = [];
-		for (const modelRaw of models) {
-			if (typeof modelRaw === "string") {
-				const id = `${providerId}/${modelRaw}`;
-				if (needle && !id.toLowerCase().includes(needle) && !name.toLowerCase().includes(needle)) continue;
-				modelCount += 1;
-				modelLines.push(`  - ${id}`);
-				continue;
-			}
-			const model = asRecord(modelRaw);
-			const modelId = typeof model?.modelId === "string" ? model.modelId : undefined;
-			if (!modelId) continue;
-			const id = `${providerId}/${modelId}`;
-			const hay = `${id} ${name}`.toLowerCase();
-			if (needle && !hay.includes(needle)) continue;
-			modelCount += 1;
-			const selected = model?.selected === true ? " · selected" : "";
-			modelLines.push(`  - ${id}${selected}`);
+	for (const option of models) {
+		const id = formatModelRef(option.target);
+		if (needle !== undefined && !`${id} ${option.label} ${option.value}`.toLowerCase().includes(needle)) {
+			continue;
 		}
-		if (needle && modelLines.length === 0 && !`${providerId} ${name}`.toLowerCase().includes(needle)) continue;
-		lines.push(header);
-		if (modelLines.length === 0) lines.push("  (no models listed)");
-		else lines.push(...modelLines);
+		count += 1;
+		// The variant already rides along in the ref, so it is not repeated here.
+		lines.push(`  - ${formatModelRef(option.target)}  · ${option.label}`);
 	}
 
-	if (lines.length === 0) {
+	if (count === 0) {
+		return toolResult(`No advertised model matches "${search}".`, true);
+	}
+
+	// With a search filter the footer is dropped: printing the unfiltered current
+	// selection under a filtered list reads as a row that failed to match.
+	const current = search === undefined ? selects.find((select) => select.id === "model")?.currentValue : undefined;
+	const header = count === 1 ? "1 model available:" : `${count} models available:`;
+	// The current selection is shown in the printable spelling, not as the
+	// opaque ACP value: `--model m:…` on print is rejected, so printing the
+	// opaque form here would hand the caller something it cannot use.
+	const currentTarget = current === undefined ? null : decodeAcpModelValue(current);
+	const footer =
+		currentTarget === null
+			? ""
+			: `\n\ncurrent: ${formatModelRef(currentTarget)}\nPass one of these as \`model\`. On the acp transport it is resolved to the advertised value automatically.`;
+	return toolResult(`${header}\n\n${lines.join("\n")}${footer}`);
+}
+
+export async function callMcodeContext(input: Record<string, unknown>, ctx: CallContext): Promise<ToolResult> {
+	const session = input.session;
+	if (typeof session !== "string" || session.trim() === "") {
+		return toolResult("mcode_context: `session` is required.", true);
+	}
+
+	let report: string;
+	try {
+		const query = await withSlot(() =>
+			withAcpQuery(ctx, process.cwd(), CONTEXT_TIMEOUT_MS, async (acp) => {
+				await acp.loadSession(session);
+				return (await acp.prompt("/context")).text;
+			}),
+		);
+		report = query.value.trim();
+	} catch (err) {
 		return toolResult(
-			search ? `No mcode providers or models match "${search}".` : "mcode reported no providers.",
+			`mcode_context could not read the session's context: ${err instanceof Error ? err.message : String(err)}`,
 			true,
 		);
 	}
 
-	const intro = `${providers.length} provider(s), ${modelCount} model(s)${source ? `, source ${source}` : ""}:`;
-	return toolResult(`${intro}\n\n${lines.join("\n")}`);
+	if (report === "") {
+		return toolResult(`mcode_context: mcode returned no context report for session ${session}.`, true);
+	}
+	// A session that has not run yet has no snapshot; say so plainly instead of
+	// passing the placeholder line through as if it were a measurement.
+	if (/no runtime context snapshot/i.test(report)) {
+		return toolResult(
+			`Session ${session} has no context snapshot yet — it has not completed a turn. ` +
+				"Run a turn with mcode or mcode_reply first, then ask again.",
+			true,
+		);
+	}
+
+	return toolResult(`Context report for session ${session}:\n\n${report}`);
 }
 
 export function callMcodeSend(input: Record<string, unknown>): ToolResult {
