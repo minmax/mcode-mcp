@@ -2,7 +2,7 @@
 
 What changed in behaviour, in the order it shipped. Dates are publish dates from the registry.
 
-## Unreleased
+## 0.2.0 — 2026-10-01
 
 - **The installer launcher is found automatically.** `mcode` is resolved as `MCODE_MCP_BIN`, then `<prefix>/bin/mcode` (`$MCODE_INSTALL_DIR`, default `~/.minimax-code`), then `mcode` on `PATH`. A stale global `mcode` earlier on `PATH` no longer wins over the installed one.
 - **Removed `MCODE_MCP_WRAP`.** The launcher pins the right Node itself; a command prefix in front of a shell launcher made Node parse `#!/bin/sh` as JavaScript. Point `MCODE_MCP_BIN` at the launcher instead.
