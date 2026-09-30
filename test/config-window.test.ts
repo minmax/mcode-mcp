@@ -84,6 +84,18 @@ describe("locating the config", () => {
 		expect(resolveConfigPath()).toBe(configPath);
 	});
 
+	it("honours MAVIS_DATA_DIR when MINIMAX_DATA_DIR is unset, like the session store", () => {
+		delete process.env.MINIMAX_DATA_DIR;
+		const savedMavis = process.env.MAVIS_DATA_DIR;
+		process.env.MAVIS_DATA_DIR = dir;
+		try {
+			expect(resolveConfigPath()).toBe(configPath);
+		} finally {
+			if (savedMavis === undefined) delete process.env.MAVIS_DATA_DIR;
+			else process.env.MAVIS_DATA_DIR = savedMavis;
+		}
+	});
+
 	it("prefers the explicit override", () => {
 		process.env.MCODE_MCP_MINIMAX_CONFIG = configPath;
 		expect(resolveConfigPath()).toBe(configPath);

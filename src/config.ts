@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isPermission, type Permission } from "./types.ts";
@@ -26,14 +26,25 @@ function numEnvOrUndefined(name: string, min: number): number | undefined {
 	return value;
 }
 
-export const MCODE_BIN = process.env.MCODE_MCP_BIN ?? "mcode";
-
 /**
- * Optional command prefix, e.g. MCODE_MCP_WRAP="/path/to/node-22.22/bin/node".
- * Lets you pick the Node that matches MiniMax Code's native SQLite ABI without
- * this server knowing anything about installers.
+ * Which `mcode` to spawn. The MiniMax Code installer keeps the CLI in a per-user
+ * prefix (`~/.minimax-code`, or `$MCODE_INSTALL_DIR`) and exposes a launcher at
+ * `<prefix>/bin/mcode` that follows the `current` release pointer and pins the
+ * Node that matches the native SQLite ABI. Prefer it over whatever `mcode` the
+ * PATH happens to hold; `MCODE_MCP_BIN` overrides both.
  */
-export const MCODE_WRAP = (process.env.MCODE_MCP_WRAP ?? "").trim();
+export function resolveMcodeBin(
+	env: NodeJS.ProcessEnv = process.env,
+	exists: (path: string) => boolean = existsSync,
+): string {
+	const explicit = env.MCODE_MCP_BIN?.trim();
+	if (explicit) return explicit;
+	const prefix = env.MCODE_INSTALL_DIR?.trim() || join(homedir(), ".minimax-code");
+	const launcher = join(prefix, "bin", "mcode");
+	return exists(launcher) ? launcher : "mcode";
+}
+
+export const MCODE_BIN = resolveMcodeBin();
 
 export const TIMEOUT_MS = numEnvOrUndefined("MCODE_MCP_TIMEOUT_MS", 1_000);
 export const MAX_TIMEOUT_MS = numEnv("MCODE_MCP_MAX_TIMEOUT_MS", 86_400_000, 1_000);

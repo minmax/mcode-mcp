@@ -16,7 +16,7 @@ Sibling of [pi-cli-mcp](https://www.npmjs.com/package/pi-cli-mcp),
 same principles, MiniMax Code behind the wheel. Design: [SPEC.md](SPEC.md).
 Behaviour: [CHANGELOG.md](CHANGELOG.md).
 
-Verified against MiniMax Code **0.5.8**.
+Verified against MiniMax Code **0.5.9**.
 
 ## Install
 
@@ -25,18 +25,16 @@ npx -y mcode-mcp         # no install
 npm install -g mcode-mcp # or global
 ```
 
-Requires Node ≥ 22 and a working `mcode` on `PATH` (`npm i -g @minimax-ai/code`).
-MiniMax Code itself needs Node `>=22.19 <23` or `>=24 <27`, and its native
-SQLite module must match that Node ABI. If `mcode` refuses to start, point the
-adapter at the CLI and a matching Node without changing global PATH:
+Requires Node ≥ 22 and MiniMax Code installed with its own installer.
 
-```bash
-export MCODE_MCP_BIN=/path/to/@minimax-ai/code/cli.js
-export MCODE_MCP_WRAP=/path/to/node
-```
+The installer keeps MiniMax Code in `~/.minimax-code` (or `$MCODE_INSTALL_DIR`)
+and exposes a launcher, `<prefix>/bin/mcode`, that follows the current release
+and pins a Node matching MiniMax Code's native SQLite ABI. The adapter finds and
+spawns that launcher by itself; there is nothing to configure.
 
-`MCODE_MCP_WRAP` is a command prefix (no shell interpolation). The process is
-spawned as `node cli.js <args…>`.
+Resolution order: `MCODE_MCP_BIN` → `<prefix>/bin/mcode` → `mcode` on `PATH`.
+Set `MCODE_MCP_BIN` only to use a different `mcode`. Never point it into
+`<prefix>/releases/<version>/…`: that path changes on every self-update.
 
 ### Claude Code
 
@@ -170,4 +168,15 @@ git clone https://github.com/minmax/mcode-mcp.git
 cd mcode-mcp
 npm ci
 npm test
+```
+
+### Releasing
+
+Releases are published by the `Publish npm package` workflow when a `v*` tag is
+pushed. It authenticates through npm trusted publishing (GitHub OIDC), so there
+is no `NPM_TOKEN` secret. The tag must equal `v<version>` from `package.json`.
+
+```bash
+npm version patch   # bumps package.json and creates the vX.Y.Z tag
+git push --follow-tags
 ```

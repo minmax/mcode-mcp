@@ -2,6 +2,13 @@
 
 What changed in behaviour, in the order it shipped. Dates are publish dates from the registry.
 
+## Unreleased
+
+- **The installer launcher is found automatically.** `mcode` is resolved as `MCODE_MCP_BIN`, then `<prefix>/bin/mcode` (`$MCODE_INSTALL_DIR`, default `~/.minimax-code`), then `mcode` on `PATH`. A stale global `mcode` earlier on `PATH` no longer wins over the installed one.
+- **Removed `MCODE_MCP_WRAP`.** The launcher pins the right Node itself; a command prefix in front of a shell launcher made Node parse `#!/bin/sh` as JavaScript. Point `MCODE_MCP_BIN` at the launcher instead.
+- **One data directory for everything.** The config window patch now resolves `MINIMAX_DATA_DIR`, then `MAVIS_DATA_DIR`, then `~/.minimax` exactly like session lookup; before, it ignored `MAVIS_DATA_DIR` and `~` paths.
+- Verified against MiniMax Code 0.5.9.
+
 ## 0.1.0 — 2026-09-29
 
 First public release. Adapter over the installed MiniMax Code CLI (`mcode` / `@minimax-ai/code`), developed and verified against 0.5.8. Not MiniMax M3 in Pi, not `mmx-cli`.

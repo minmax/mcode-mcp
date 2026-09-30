@@ -35,9 +35,10 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseModelTarget } from "./model-ref.ts";
+import { dataDir } from "./transcript.ts";
 
 const CONTEXT_LIMITS_KEY = "minimaxModelContextLimits";
 // A crash between patching the config and putting it back would leave the user's
@@ -168,13 +169,7 @@ export function resolveConfigPath(): string | null {
 	const override = process.env.MCODE_MCP_MINIMAX_CONFIG?.trim();
 	if (override) return existsSync(override) ? override : null;
 
-	const dataDir = process.env.MINIMAX_DATA_DIR?.trim();
-	if (dataDir) {
-		const candidate = join(dataDir, "config.yaml");
-		return existsSync(candidate) ? candidate : null;
-	}
-
-	const candidate = join(homedir(), ".minimax", "config.yaml");
+	const candidate = join(dataDir(), "config.yaml");
 	return existsSync(candidate) ? candidate : null;
 }
 

@@ -9,7 +9,6 @@ import {
 	MAX_CONCURRENT,
 	MAX_LINE,
 	MCODE_BIN,
-	MCODE_WRAP,
 	TIMEOUT_MS,
 } from "./config.ts";
 import type { CancelToken } from "./types.ts";
@@ -102,13 +101,6 @@ export async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
 	}
 }
 
-function buildCommand(args: string[]): { command: string; argv: string[] } {
-	if (!MCODE_WRAP) return { command: MCODE_BIN, argv: args };
-	const parts = MCODE_WRAP.split(/\s+/);
-	const [command, ...prefix] = parts;
-	return { command: command ?? MCODE_BIN, argv: [...prefix, MCODE_BIN, ...args] };
-}
-
 function appendCapped(current: string, chunk: string): string {
 	if (current.length >= MAX_CAPTURE) return current;
 	return current + chunk.slice(0, MAX_CAPTURE - current.length);
@@ -124,17 +116,16 @@ export function runMcode(args: string[], cwd: string, options: RunOptions = {}):
 			return;
 		}
 
-		const { command, argv } = buildCommand(args);
 		let child: ReturnType<typeof spawn>;
 		try {
-			child = spawn(command, argv, {
+			child = spawn(MCODE_BIN, args, {
 				cwd,
 				stdio: [options.stdin ?? "ignore", "pipe", "pipe"],
 				env: process.env,
 				detached: true,
 			});
 		} catch (err) {
-			resolve({ code: -1, stdout: "", stderr: `failed to spawn ${command}: ${(err as Error).message}` });
+			resolve({ code: -1, stdout: "", stderr: `failed to spawn ${MCODE_BIN}: ${(err as Error).message}` });
 			return;
 		}
 
@@ -253,7 +244,7 @@ export function runMcode(args: string[], cwd: string, options: RunOptions = {}):
 		};
 
 		child.on("error", (err: Error) => {
-			finish({ code: -1, stdout, stderr: `${stderr}\n${command}: ${err.message}`.trim() });
+			finish({ code: -1, stdout, stderr: `${stderr}\n${MCODE_BIN}: ${err.message}`.trim() });
 		});
 		child.on("close", (code: number | null) => {
 			finish({ code: code ?? -1, stdout, stderr, timedOut, cancelled, ...(endedBy ? { endedBy } : {}) });
