@@ -6,6 +6,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { MAX_SESSIONS, STATE_FILE } from "./config.ts";
 import { asRecord } from "./parse.ts";
+import { isValidProfileName } from "./profile.ts";
 import {
 	isPermission,
 	isSessionMode,
@@ -17,6 +18,14 @@ import {
 } from "./types.ts";
 
 const sessions = new Map<string, SessionRecord>();
+
+/** Records whose stored profile could not be used, reported once at startup. */
+let corruptProfiles = 0;
+let countingCorruptProfiles = false;
+
+function markCorruptProfile(): void {
+	if (countingCorruptProfiles) corruptProfiles += 1;
+}
 
 function readRecord(value: unknown): SessionRecord | null {
 	const entry = asRecord(value);
@@ -30,6 +39,16 @@ function readRecord(value: unknown): SessionRecord | null {
 	if (isSessionMode(entry.mode)) record.mode = entry.mode;
 	if (typeof entry.thinking_effort === "string") record.thinking_effort = entry.thinking_effort;
 	if (isSessionTransport(entry.transport)) record.transport = entry.transport;
+	// Kept as written, valid or not. Dropping an unusable name would leave a record
+	// indistinguishable from a pre-profiles one, and the next reply would then adopt
+	// it for whichever account the server happens to default to — running someone
+	// else's conversation on the wrong account. `profileForCall` validates on the
+	// way out, so a bad name is refused where it would be used, and `loadSessions`
+	// counts it so the operator hears about it at startup rather than mid-reply.
+	if (entry.profile !== undefined) {
+		if (typeof entry.profile === "string") record.profile = entry.profile;
+		if (!isValidProfileName(entry.profile)) markCorruptProfile();
+	}
 	return record;
 }
 
@@ -52,8 +71,21 @@ function readStateFile(): Map<string, SessionRecord> {
 
 export function loadSessions(): void {
 	sessions.clear();
-	for (const [id, record] of readStateFile()) sessions.set(id, record);
+	corruptProfiles = 0;
+	countingCorruptProfiles = true;
+	try {
+		for (const [id, record] of readStateFile()) sessions.set(id, record);
+	} finally {
+		countingCorruptProfiles = false;
+	}
 	prune();
+	if (corruptProfiles > 0) {
+		process.stderr.write(
+			`mcode-mcp: ${corruptProfiles} session record(s) hold an unusable profile name. They are refused ` +
+				"rather than guessed at, so start a new session instead of resuming one of those.\n",
+		);
+		corruptProfiles = 0;
+	}
 }
 
 function prune(): void {
@@ -92,6 +124,12 @@ export interface RememberOptions {
 	mode?: SessionMode | undefined;
 	thinking_effort?: string | undefined;
 	transport?: SessionTransport | undefined;
+	/**
+	 * The profile name to record, `default` for the implicit one. Recorded always
+	 * and stored verbatim, because a session that says "default" must stay on the
+	 * default account after the server's own default moves on.
+	 */
+	profile?: string | undefined;
 }
 
 export function rememberSession(id: string, cwd: string, extra: RememberOptions = {}): void {
@@ -102,6 +140,7 @@ export function rememberSession(id: string, cwd: string, extra: RememberOptions 
 	if (extra.mode !== undefined) next.mode = extra.mode;
 	if (extra.thinking_effort !== undefined) next.thinking_effort = extra.thinking_effort;
 	if (extra.transport !== undefined) next.transport = extra.transport;
+	if (extra.profile !== undefined) next.profile = extra.profile;
 	sessions.set(id, next);
 	prune();
 	save();

@@ -1,7 +1,15 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { Client, makeWorkspace, readStdinLog, sessionIdOf, sleep, type Workspace } from "./helpers/client.ts";
+import {
+	Client,
+	makeWorkspace,
+	readFakeRuns,
+	readStdinLog,
+	sessionIdOf,
+	sleep,
+	type Workspace,
+} from "./helpers/client.ts";
 
 async function sessionIdOfRunning(client: Client): Promise<string> {
 	const running = await client.tool("mcode_running");
@@ -27,13 +35,10 @@ describe("print transport", () => {
 		await client.tool("mcode_reply", { session: id, prompt: "again", cwd: ws.dir, transport: "print" });
 		client.close();
 
-		const argvs = readFileSync(argvLog, "utf8")
-			.trim()
-			.split("\n")
-			.map((line) => JSON.parse(line) as string[]);
-		expect(argvs.length).toBe(2);
-		const firstRun = argvs[0] ?? [];
-		const replyArgv = argvs[1] ?? [];
+		const runs = readFakeRuns(argvLog);
+		expect(runs.length).toBe(2);
+		const firstRun = runs[0]?.argv ?? [];
+		const replyArgv = runs[1]?.argv ?? [];
 		expect(firstRun[0]).toBe("exec");
 		expect(firstRun).toContain("--output-format");
 		expect(firstRun).toContain("stream-json");
@@ -60,7 +65,7 @@ describe("print transport", () => {
 		});
 		client.close();
 		expect(res.isError).toBe(false);
-		const firstRun = JSON.parse(readFileSync(argvLog, "utf8").trim().split("\n")[0] ?? "[]") as string[];
+		const firstRun = readFakeRuns(argvLog)[0]?.argv ?? [];
 		expect(firstRun).toContain("--model");
 		expect(firstRun.at(firstRun.indexOf("--model") + 1)).toBe("minimax_oauth/MiniMax-M2.5");
 		expect(firstRun.indexOf("--model")).toBeLessThan(firstRun.lastIndexOf("--"));
@@ -219,7 +224,7 @@ describe("mcode_send", () => {
 		writeFileSync(argvLog, "");
 		await client.tool("mcode_reply", { session: id, prompt: "again", cwd: ws.dir });
 		client.close();
-		const replyArgv = JSON.parse(readFileSync(argvLog, "utf8").trim().split("\n")[0] ?? "[]") as string[];
+		const replyArgv = readFakeRuns(argvLog)[0]?.argv ?? [];
 		expect(replyArgv[0]).toBe("exec");
 		expect(replyArgv).toContain("--session");
 	});

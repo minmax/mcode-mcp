@@ -1,8 +1,12 @@
+import { profileArgs } from "../profile.ts";
 import type { RunPlan } from "./types.ts";
 
 /**
  * `mcode exec` headless flags. Prompt is last after `--` so a leading dash in
  * the task text cannot be parsed as an option. argv is a string array — no shell.
+ *
+ * `--profile` is emitted before `--`, where mcode still reads options: after it
+ * every token is prompt text, so a profile named there would be part of the task.
  *
  * `configPath` becomes `--config`: exec accepts an explicit runtime config for
  * this process, which is how a context window is set without touching the user's
@@ -11,6 +15,7 @@ import type { RunPlan } from "./types.ts";
 export function printArgs(plan: RunPlan): string[] {
 	const { overrides } = plan;
 	const args: string[] = ["exec", "--output-format", "stream-json", "--cwd", plan.cwd];
+	args.push(...profileArgs(plan.profile));
 	if (overrides.permission) args.push("--permission", overrides.permission);
 	if (overrides.model) args.push("--model", overrides.model);
 	if (plan.configPath) args.push("--config", plan.configPath);
@@ -20,12 +25,8 @@ export function printArgs(plan: RunPlan): string[] {
 	return args;
 }
 
-export function agentArgs(): string[] {
-	return ["acp"];
-}
-
-export function modelsArgs(): string[] {
-	return ["provider", "list", "--json"];
+export function agentArgs(profile: string | null = null): string[] {
+	return ["acp", ...profileArgs(profile)];
 }
 
 /** ACP `permissionMode` config values. `off` is exec-only. */

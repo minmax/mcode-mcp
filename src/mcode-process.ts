@@ -37,6 +37,12 @@ export interface RunOptions {
 	onStart?: (handle: McodeHandle) => void;
 	stdin?: "ignore" | "pipe";
 	gracefulStop?: (reason: "timeout" | "cancelled") => void;
+	/**
+	 * Environment for the child. Omit to inherit the server's own; `profile.ts`
+	 * supplies a copy with the run's profile pinned so the child and this server
+	 * cannot resolve different accounts.
+	 */
+	env?: NodeJS.ProcessEnv;
 }
 
 const liveTrees = new Set<(signal: NodeJS.Signals) => void>();
@@ -121,7 +127,7 @@ export function runMcode(args: string[], cwd: string, options: RunOptions = {}):
 			child = spawn(MCODE_BIN, args, {
 				cwd,
 				stdio: [options.stdin ?? "ignore", "pipe", "pipe"],
-				env: process.env,
+				env: options.env ?? process.env,
 				detached: true,
 			});
 		} catch (err) {

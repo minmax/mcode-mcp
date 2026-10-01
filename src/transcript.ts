@@ -2,32 +2,29 @@
 //
 // Native layout (mcode 0.3.11, confirmed on ~/.minimax/v2/sessions):
 //   <dataDir>/v2/sessions/YYYY/MM/DD/<time>-session_<b64(sessionId)>/messages.jsonl
-// dataDir is MINIMAX_DATA_DIR or MAVIS_DATA_DIR, else ~/.minimax.
+// dataDir is MINIMAX_DATA_DIR or MAVIS_DATA_DIR, else ~/.minimax for the default
+// profile and ~/.minimax-<name> for a named one — see profile.ts.
 // Session ids look like `mvs_<hex>`. This module only looks under v2/sessions.
+//
+// Every lookup takes the profile the session was started under. A session's
+// transcript lives in its own account's store, so a lookup that guessed the
+// default would report "no transcript" for a session that plainly has one.
 
 import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
+import { dataDirForProfile } from "./profile.ts";
 
-export function dataDir(): string {
-	const configured = process.env.MINIMAX_DATA_DIR?.trim() || process.env.MAVIS_DATA_DIR?.trim();
-	if (configured === undefined || configured === "") return join(homedir(), ".minimax");
-	if (configured === "~") return homedir();
-	if (configured.startsWith("~/")) return join(homedir(), configured.slice(2));
-	return resolve(configured);
-}
-
-export function storeRoot(): string {
-	return join(dataDir(), "v2", "sessions");
+export function storeRoot(profile: string | null = null): string {
+	return join(dataDirForProfile(profile), "v2", "sessions");
 }
 
 export function sessionDirSuffix(sessionId: string): string {
 	return `-session_${Buffer.from(sessionId, "utf8").toString("base64")}`;
 }
 
-export function expectedTranscript(sessionId: string): string {
+export function expectedTranscript(sessionId: string, profile: string | null = null): string {
 	return join(
-		storeRoot(),
+		storeRoot(profile),
 		"_unknown",
 		`session_${Buffer.from(sessionId, "utf8").toString("base64")}`,
 		"messages.jsonl",
@@ -46,8 +43,8 @@ function listNames(dir: string): string[] {
  * Absolute path of messages.jsonl, or null while mcode has not created it yet.
  * Lookup is YYYY/MM/DD directories whose name ends with `-session_<b64(id)>`.
  */
-export function findTranscript(sessionId: string): string | null {
-	const root = storeRoot();
+export function findTranscript(sessionId: string, profile: string | null = null): string | null {
+	const root = storeRoot(profile);
 	const suffix = sessionDirSuffix(sessionId);
 	let best: { path: string; mtime: number } | null = null;
 	for (const year of listNames(root)) {

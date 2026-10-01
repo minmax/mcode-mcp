@@ -16,6 +16,8 @@ import { INIT_TIMEOUT_MS, SERVER_INFO } from "./config.ts";
 import type { McodeHandle, RunResult } from "./mcode-process.ts";
 import { runMcode } from "./mcode-process.ts";
 import { asRecord } from "./parse.ts";
+import { childEnv } from "./profile.ts";
+import { agentArgs } from "./transport/args.ts";
 import type { CallContext } from "./types.ts";
 
 export interface AcpQuerySession {
@@ -176,20 +178,26 @@ class QueryClient {
 /**
  * Open `mcode acp`, hand a scripted session to `fn`, then close the process.
  * `fn` decides which session to open; a failure still tears the process down.
+ *
+ * `profile` is the account the read runs against. It is not optional in effect:
+ * a session/load under the wrong profile either fails or reports another
+ * account's budget, so it is resolved by the caller exactly as a run resolves it.
  */
 export async function withAcpQuery<T>(
 	ctx: CallContext,
 	cwd: string,
 	timeoutMs: number,
+	profile: string | null,
 	fn: (session: AcpQuerySession) => Promise<T>,
 ): Promise<AcpQueryResult<T>> {
 	let handle: McodeHandle | undefined;
 	let client: QueryClient | undefined;
 
-	const running = runMcode(["acp"], cwd, {
+	const running = runMcode(agentArgs(profile), cwd, {
 		token: ctx.token,
 		timeoutMs,
 		stdin: "pipe",
+		env: childEnv(profile),
 		onStart: (mcodeHandle) => {
 			handle = mcodeHandle;
 			client = new QueryClient(mcodeHandle);

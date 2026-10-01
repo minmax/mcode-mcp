@@ -35,6 +35,16 @@ import type { RunResult } from "./mcode-process.ts";
 import { withSlot } from "./mcode-process.ts";
 import { ConfigEditError } from "./minimax-config.ts";
 import { acpModelOptions, acpSelects, decodeAcpModelValue, formatModelRef } from "./model-ref.ts";
+import {
+	DEFAULT_PROFILE_NAME,
+	dataDirForProfile,
+	dataDirIsOverridden,
+	describeProfileState,
+	listProfiles,
+	profileDirExists,
+	profileForCall,
+	serverProfile,
+} from "./profile.ts";
 import { getSession, listSessions, rememberSession, withSessionLock } from "./sessions.ts";
 import { findTranscript, statKey } from "./transcript.ts";
 import type { RunPlan, Transport } from "./transport/index.ts";
@@ -70,6 +80,16 @@ const LOCAL_LISTING = {
 } as const;
 
 const SHARED_PROPS = {
+	profile: {
+		type: "string",
+		description:
+			"Named auth profile: its own MiniMax account, sessions and settings, in ~/.minimax-<name>. " +
+			"Omit to use this server's default (MCODE_MCP_PROFILE, else the default profile). 'default' " +
+			"means the default profile explicitly. A session keeps the profile it started under, so " +
+			"`mcode_reply` does not need it, and it may not be changed — a session id only names a " +
+			"conversation inside one account. Use mcode_profiles to list what exists and what is signed in; " +
+			"add one with `mcode login --profile <name>` in a terminal.",
+	},
 	model: {
 		type: "string",
 		description:
@@ -198,10 +218,24 @@ export const TOOLS: ToolDefinition[] = [
 					type: "string",
 					description: "Optional substring filter on provider or model id.",
 				},
+				profile: SHARED_PROPS.profile,
 			},
 			additionalProperties: false,
 		},
 		annotations: LIVE_LISTING,
+	},
+	{
+		name: "mcode_profiles",
+		description:
+			"List the MiniMax auth profiles on this machine, and which one this server uses by default. " +
+			"A profile is an isolated data directory (~/.minimax-<name>) with its own account, sessions and " +
+			"settings, so several token plans can be kept side by side. Read the credential state before " +
+			"choosing one: a profile reported as 'signed out' or 'not created' has nothing to authenticate " +
+			"with, and running against it is how a task ends up charged to the wrong account. Starts no " +
+			"process and starts no task. Add one with `mcode login --profile <name>` in a terminal — login is " +
+			"interactive and has no headless equivalent.",
+		inputSchema: { type: "object", properties: {}, additionalProperties: false },
+		annotations: LOCAL_LISTING,
 	},
 	{
 		name: "mcode_context",
@@ -219,6 +253,12 @@ export const TOOLS: ToolDefinition[] = [
 				session: {
 					type: "string",
 					description: "Session id, as printed in the [session: <id>] prefix of an mcode answer.",
+				},
+				profile: {
+					...SHARED_PROPS.profile,
+					description:
+						"Defaults to the profile the session was started under, which is almost always what " +
+						"you want — pass it only to read a session recorded under another profile.",
 				},
 			},
 			required: ["session"],
@@ -310,6 +350,12 @@ export const TOOLS: ToolDefinition[] = [
 					type: "integer",
 					minimum: 1,
 					description: `Max characters per item text (default ${HISTORY_DEFAULT_MAX_CHARS}, max ${HISTORY_MAX_MAX_CHARS}).`,
+				},
+				profile: {
+					...SHARED_PROPS.profile,
+					description:
+						"Defaults to the profile the session was started under. The page reports which profile " +
+						"it actually read, and a cursor from one profile is refused in another.",
 				},
 				include_tools: {
 					type: "boolean",
@@ -445,29 +491,80 @@ function readPrompt(value: unknown, tool: string): string {
 	return value;
 }
 
+/**
+ * The profile one call runs under, or null for the default.
+ *
+ * The chain from argument to recorded session to server default is where a
+ * wrong-account read hides, so it lives in one place — `profileForCall` — and this
+ * only turns its rejection into a readable tool error instead of a run that quietly
+ * lands in another account. `mcode_history` resolves the same way.
+ */
+function readProfile(input: unknown, tool: string, known?: { profile?: string } | undefined): string | null {
+	try {
+		return profileForCall(input, known?.profile);
+	} catch (err) {
+		throw new Error(`${tool}: ${(err as Error).message}`);
+	}
+}
+
+/**
+ * Refuse a profile that has no directory yet.
+ *
+ * `mcode` creates the data directory on first use, so a mistyped name would
+ * otherwise spawn happily, produce an empty account and fail much later with an
+ * authentication error that points nowhere near the typo. A profile that exists
+ * but is not signed in is left alone: it may hold an API key, and mcode is the
+ * authority on whether it can authenticate.
+ */
+function readExistingProfile(input: unknown, tool: string, known?: { profile?: string } | undefined): string | null {
+	const profile = readProfile(input, tool, known);
+	if (profile !== null && !profileDirExists(profile)) {
+		throw new Error(
+			`${tool}: no profile named "${profile}" — there is no data directory at ${dataDirForProfile(profile)} ` +
+				"on this machine. Check the name with mcode_profiles, or sign the profile in with " +
+				"`mcode login --profile <name>`.",
+		);
+	}
+	return profile;
+}
+
 interface Outcome {
 	acc: Accumulator;
 	result: RunResult;
 	elapsedMs: number;
 }
 
-function identityPrefix(id: string): string {
-	return `[session: ${id}]\n[session-key: mcode:${id}]`;
+function identityPrefix(id: string, profile: string | null): string {
+	// The profile rides along on every answer that is not the default one: it is
+	// the difference between "this account's model answered" and "the other one
+	// did", and nothing else in the answer says which account ran.
+	const tag = profile === null ? "" : `\n[profile: ${profile}]`;
+	return `[session: ${id}]\n[session-key: mcode:${id}]${tag}`;
 }
 
-function rememberExtras(overrides: RunOverrides, transport: SessionTransport): Parameters<typeof rememberSession>[2] {
+function rememberExtras(
+	overrides: RunOverrides,
+	transport: SessionTransport,
+	profile: string | null,
+): Parameters<typeof rememberSession>[2] {
 	return {
 		model: overrides.model,
 		permission: overrides.permission,
 		mode: overrides.mode,
 		thinking_effort: overrides.thinking_effort,
 		transport,
+		// Spelled out rather than omitted for the default profile: a session that
+		// says "default" has to stay there when the server's own default changes.
+		profile: profile ?? DEFAULT_PROFILE_NAME,
 	};
 }
 
-function announceStart(ctx: CallContext, id: string, cwd: string, model?: string): void {
+function announceStart(ctx: CallContext, id: string, cwd: string, model?: string, profile?: string | null): void {
 	if (!ctx.progress) return;
 	const bits = [`mcode started · mcode:${id}`];
+	// Named only when there is one: a progress line is not the place to teach the
+	// default case, and the point is to make a non-default run obvious at a glance.
+	if (profile) bits.push(`profile=${profile}`);
 	if (model) bits.push(model);
 	bits.push(`cwd=${cwd}`);
 	ctx.progress(bits.join(" · "));
@@ -536,12 +633,14 @@ export async function callMcode(input: Record<string, unknown>, ctx: CallContext
 	let overrides: RunOverrides;
 	let timeoutMs: number | undefined;
 	let transport: Transport;
+	let profile: string | null;
 	try {
 		prompt = readPrompt(input.prompt, "mcode");
 		cwd = resolveCwd(input.cwd);
 		timeoutMs = readTimeout(input.timeout_ms);
 		transport = resolveTransport(input.transport);
 		overrides = readOverrides(input, transport.name);
+		profile = readExistingProfile(input.profile, "mcode");
 	} catch (err) {
 		return toolResult(`mcode: ${(err as Error).message}`, true);
 	}
@@ -552,16 +651,17 @@ export async function callMcode(input: Record<string, unknown>, ctx: CallContext
 		sessionId: "",
 		prompt,
 		overrides,
+		profile,
 		timeoutMs: timeoutMs ?? TIMEOUT_MS,
 		onSessionId: (id) => {
 			sessionId = id;
-			rememberSession(id, cwd, rememberExtras(overrides, transport.name));
-			announceStart(ctx, id, cwd, overrides.model);
+			rememberSession(id, cwd, rememberExtras(overrides, transport.name, profile));
+			announceStart(ctx, id, cwd, overrides.model, profile);
 		},
 	};
 	const outcome = await withSlot(() => invokeMcode(transport, plan, ctx));
 	if (outcome.result.sessionId) sessionId = outcome.result.sessionId;
-	if (sessionId) rememberSession(sessionId, cwd, rememberExtras(overrides, transport.name));
+	if (sessionId) rememberSession(sessionId, cwd, rememberExtras(overrides, transport.name, profile));
 
 	if (failedRun(outcome)) {
 		return toolResult(
@@ -580,7 +680,7 @@ export async function callMcode(input: Record<string, unknown>, ctx: CallContext
 		outcome,
 		brokenAnswer
 			? `note: session ${sessionId || "(unknown)"} never produced a result envelope; it stays listed by mcode_sessions`
-			: identityPrefix(sessionId),
+			: identityPrefix(sessionId, profile),
 	);
 }
 
@@ -596,6 +696,7 @@ export async function callMcodeReply(input: Record<string, unknown>, ctx: CallCo
 	let overrides: RunOverrides;
 	let timeoutMs: number | undefined;
 	let transport: Transport;
+	let profile: string | null;
 	try {
 		prompt = readPrompt(input.prompt, "mcode_reply");
 		cwd = resolveCwd(input.cwd ?? known?.cwd);
@@ -611,8 +712,25 @@ export async function callMcodeReply(input: Record<string, unknown>, ctx: CallCo
 			},
 			transport.name,
 		);
+		profile = readExistingProfile(input.profile, "mcode_reply", known);
 	} catch (err) {
 		return toolResult(`mcode_reply: ${(err as Error).message}`, true);
+	}
+
+	// Resuming under a different profile would ask another account to `session/load`
+	// an id it never issued. That either fails or, worse, silently starts a
+	// different conversation in a different account under the same session key.
+	// Reading a session from another account is what `mcode_history` and
+	// `mcode_context` are for; a reply may not move one.
+	const recorded = known === undefined ? undefined : profileForCall(undefined, known.profile);
+	if (recorded !== undefined && profile !== recorded) {
+		return toolResult(
+			`mcode_reply: session ${session} belongs to profile "${recorded ?? DEFAULT_PROFILE_NAME}", and this ` +
+				`call asked for "${profile ?? DEFAULT_PROFILE_NAME}". A session id only names a conversation inside ` +
+				"one account, so it cannot be resumed in another. Omit `profile` to resume where it started, or " +
+				"use mcode_history / mcode_context to read it from the other account.",
+			true,
+		);
 	}
 
 	const plan: RunPlan = {
@@ -621,13 +739,17 @@ export async function callMcodeReply(input: Record<string, unknown>, ctx: CallCo
 		resume: true,
 		prompt,
 		overrides,
+		profile,
 		timeoutMs: timeoutMs ?? TIMEOUT_MS,
 	};
-	announceStart(ctx, session, cwd, overrides.model);
+	announceStart(ctx, session, cwd, overrides.model, profile);
 	const outcome = await withSessionLock(session, () => withSlot(() => invokeMcode(transport, plan, ctx)));
 
 	if (failedRun(outcome)) {
-		rememberSession(session, cwd, {});
+		// Pinned even on failure, and only when the record had none: this run
+		// already chose an account, so a later reply that says nothing must not
+		// resolve to a different one.
+		rememberSession(session, cwd, recorded === undefined ? { profile: profile ?? DEFAULT_PROFILE_NAME } : {});
 		return toolResult(
 			renderFailure(outcome.acc, outcome.result, outcome.elapsedMs, {
 				id: session,
@@ -644,6 +766,7 @@ export async function callMcodeReply(input: Record<string, unknown>, ctx: CallCo
 		mode?: SessionMode;
 		thinking_effort?: string;
 		transport?: SessionTransport;
+		profile?: string;
 	} = {};
 	if (input.model !== undefined && overrides.model !== undefined) remembered.model = overrides.model;
 	if (input.permission !== undefined && overrides.permission !== undefined) {
@@ -654,15 +777,25 @@ export async function callMcodeReply(input: Record<string, unknown>, ctx: CallCo
 		remembered.thinking_effort = overrides.thinking_effort;
 	}
 	if (input.transport !== undefined || known?.transport === undefined) remembered.transport = transport.name;
+	// The profile is never rewritten by a reply. It was pinned when the session
+	// was created and the guard above refuses any value that would move it, so
+	// there is nothing here that could disagree with the session's own account.
+	if (recorded === undefined) remembered.profile = profile ?? DEFAULT_PROFILE_NAME;
 	rememberSession(session, cwd, remembered);
 
-	return renderSuccess(outcome, identityPrefix(session));
+	return renderSuccess(outcome, identityPrefix(session, profile));
 }
 
 export async function callMcodeModels(input: Record<string, unknown>, ctx: CallContext): Promise<ToolResult> {
 	const search = input.search;
 	if (search !== undefined && typeof search !== "string") {
 		return toolResult("mcode_models: `search` must be a string.", true);
+	}
+	let profile: string | null;
+	try {
+		profile = readExistingProfile(input.profile, "mcode_models");
+	} catch (err) {
+		return toolResult((err as Error).message, true);
 	}
 
 	// `mcode provider list --json` describes *configured credentials*, and under a
@@ -672,7 +805,7 @@ export async function callMcodeModels(input: Record<string, unknown>, ctx: CallC
 	let configOptions: unknown;
 	try {
 		const query = await withSlot(() =>
-			withAcpQuery(ctx, process.cwd(), MODELS_TIMEOUT_MS, async (session) => {
+			withAcpQuery(ctx, process.cwd(), MODELS_TIMEOUT_MS, profile, async (session) => {
 				const created = await session.newSession();
 				return created.configOptions;
 			}),
@@ -680,7 +813,8 @@ export async function callMcodeModels(input: Record<string, unknown>, ctx: CallC
 		configOptions = query.value;
 	} catch (err) {
 		return toolResult(
-			`mcode_models could not read the model catalog: ${err instanceof Error ? err.message : String(err)}`,
+			`mcode_models could not read the model catalog${profile === null ? "" : ` for profile ${profile}`}: ` +
+				`${err instanceof Error ? err.message : String(err)}`,
 			true,
 		);
 	}
@@ -735,10 +869,19 @@ export async function callMcodeContext(input: Record<string, unknown>, ctx: Call
 		return toolResult("mcode_context: `session` is required.", true);
 	}
 
+	// The session's own account, not the server's: session/load under a different
+	// profile either fails or reports another account's budget.
+	let profile: string | null;
+	try {
+		profile = readExistingProfile(input.profile, "mcode_context", getSession(session));
+	} catch (err) {
+		return toolResult((err as Error).message, true);
+	}
+
 	let report: string;
 	try {
 		const query = await withSlot(() =>
-			withAcpQuery(ctx, process.cwd(), CONTEXT_TIMEOUT_MS, async (acp) => {
+			withAcpQuery(ctx, process.cwd(), CONTEXT_TIMEOUT_MS, profile, async (acp) => {
 				await acp.loadSession(session);
 				return (await acp.prompt("/context")).text;
 			}),
@@ -855,11 +998,76 @@ export function callMcodeSessions(): ToolResult {
 		const when = entry.lastAccessed ? new Date(entry.lastAccessed).toISOString() : "unknown";
 		const model = entry.model ? `  ${entry.model}` : "";
 		const wire = entry.transport ? `  ${entry.transport}` : "";
-		const transcript = findTranscript(id) ?? "(no transcript on disk)";
-		return `${statKey(id)}  ${when}  ${entry.cwd}${wire}${model}\n    ${transcript}`;
+		// Each session's transcript lives in its own account's store, so the lookup
+		// has to use the profile it was started under — normalised, because the
+		// record stores the literal name `default` and that resolves to no suffix at
+		// all, not to `~/.minimax-default`.
+		//
+		// A record whose stored name is unusable degrades to its own row. Throwing
+		// here would fail the whole listing, and the listing is how a session id is
+		// found in the first place — one corrupt row must not hide the rest.
+		let profile: string | null | undefined;
+		try {
+			profile = profileForCall(undefined, entry.profile);
+		} catch {
+			return `${statKey(id)}  ${when}  ${entry.cwd}${wire}${model}\n    (unusable stored profile — start a new session instead of resuming this one)`;
+		}
+		const transcript = findTranscript(id, profile ?? null) ?? "(no transcript on disk)";
+		const label = describeProfileLabel(profile);
+		// The profile line is noise on the overwhelmingly common default account,
+		// so it appears only when it says something the header does not.
+		return `${statKey(id)}  ${when}  ${entry.cwd}${wire}${model}${label === "" ? "" : `\n    ${label}`}\n    ${transcript}`;
 	});
 	if (rows.length === 0) {
 		return toolResult("No mcode sessions recorded yet. Start one with the `mcode` tool.");
 	}
 	return toolResult(`${rows.length} session(s), newest first:\n\n${rows.join("\n")}`);
+}
+
+/**
+ * Which account a row is on.
+ *
+ * A record with no stored profile predates profiles, so it resolves to whatever
+ * this server defaults to — which is not necessarily the default profile, and
+ * saying otherwise would point a reader at the wrong store.
+ */
+function describeProfileLabel(profile: string | null | undefined): string {
+	if (profile === null) return `profile ${DEFAULT_PROFILE_NAME}`;
+	if (profile === undefined) {
+		const active = serverProfile();
+		return active === null
+			? `profile ${DEFAULT_PROFILE_NAME} (server default)`
+			: `profile ${active} (server default)`;
+	}
+	return `profile ${profile}`;
+}
+
+/**
+ * Report the profiles on this machine.
+ *
+ * A filesystem walk, not a spawn: `mcode profile list` would cost a cold start
+ * and would only exist on a build that has profiles at all, and the question —
+ * which accounts exist and which is signed in — is answered entirely by what is
+ * on disk.
+ */
+export function callMcodeProfiles(): ToolResult {
+	const profiles = listProfiles();
+	// Cannot throw: the composition root refuses to serve on a malformed variable.
+	const activeName = serverProfile() ?? DEFAULT_PROFILE_NAME;
+	const rows = profiles.map((profile) => {
+		// Compared exactly, not case-folded: on a case-sensitive filesystem `Work`
+		// and `work` are two accounts, and folding here would mark both as the
+		// server's default and say which one to use.
+		const marker = profile.name === activeName ? "*" : " ";
+		const label = profile.name === DEFAULT_PROFILE_NAME ? `${profile.name} (default)` : profile.name;
+		return `${marker} ${label}\t${describeProfileState(profile)}\t${profile.dataDir}`;
+	});
+	const header = `${profiles.length} profile(s); * is this server's default`;
+	// A redirected data directory silently overrides every profile's own path, so
+	// say so rather than letting a caller reason from a row that is not the truth.
+	const override = dataDirIsOverridden()
+		? "\n\nMINIMAX_DATA_DIR/MAVIS_DATA_DIR is set, so every profile above resolves to that one " +
+			"directory instead of its own; unset it to give profiles separate stores."
+		: "";
+	return toolResult(`${header}:\n\n${rows.join("\n")}${override}`);
 }

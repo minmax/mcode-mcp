@@ -108,6 +108,13 @@ export interface SessionRecord {
 	mode?: SessionMode;
 	thinking_effort?: string;
 	transport?: SessionTransport;
+	/**
+	 * Named auth profile the session was started under, absent for the default one.
+	 * A session id only names a conversation inside one account's store, so this
+	 * is what makes `mcode_reply`, `mcode_history` and the transcript column of
+	 * `mcode_sessions` look in the right place.
+	 */
+	profile?: string;
 }
 
 export type JsonRpcId = string | number | null;

@@ -8,6 +8,7 @@ import type { RunResult } from "../mcode-process.ts";
 import { runMcode } from "../mcode-process.ts";
 import { contextWindowModelId, withTempContextConfig } from "../minimax-config.ts";
 import { asRecord, execUsage, formatModelRef, stringifyOutput } from "../parse.ts";
+import { childEnv } from "../profile.ts";
 import type { CallContext } from "../types.ts";
 import { printArgs } from "./args.ts";
 import type { RunPlan, Transport } from "./types.ts";
@@ -24,15 +25,15 @@ export const printTransport: Transport = {
 
 		// exec takes --config, so a run with a context window of its own gets a
 		// private copy of the config instead of an edit to the user's own file.
-		const modelId = contextWindowModelId(plan.overrides.model);
+		const modelId = contextWindowModelId(plan.overrides.model, plan.profile);
 		if (modelId === null) {
 			throw new Error(
 				"context_window needs to know which model to apply it to, but the configured default model " +
-					"could not be read from MiniMax Code's config.yaml. Pass `model` explicitly, or set " +
-					"MCODE_MCP_MINIMAX_CONFIG to the config's absolute path.",
+					"could not be read from MiniMax Code's config.yaml. Pass `model` explicitly" +
+					(plan.profile === null ? ", or set MCODE_MCP_MINIMAX_CONFIG to the config's absolute path." : "."),
 			);
 		}
-		return withTempContextConfig(modelId, wanted, (configPath) => start(configPath));
+		return withTempContextConfig(modelId, wanted, plan.profile, (configPath) => start(configPath));
 	},
 };
 
@@ -47,6 +48,7 @@ function runPrint(
 	const result = runMcode(printArgs({ ...plan, ...(configPath ? { configPath } : {}) }), plan.cwd, {
 		token: ctx.token,
 		timeoutMs: plan.timeoutMs,
+		env: childEnv(plan.profile),
 		onEvent: (raw) => {
 			const converted = convertExecLine(raw);
 			if (converted === null) return;

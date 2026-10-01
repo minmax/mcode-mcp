@@ -16,6 +16,7 @@ import { runMcode } from "../mcode-process.ts";
 import { ConfigEditError, contextWindowModelId, withContextWindow } from "../minimax-config.ts";
 import { parseModelTarget, resolveAcpModelTarget } from "../model-ref.ts";
 import { asRecord } from "../parse.ts";
+import { childEnv } from "../profile.ts";
 import type { CallContext } from "../types.ts";
 import { acpPermissionMode, agentArgs } from "./args.ts";
 import type { MidRunCommand } from "./registry.ts";
@@ -306,16 +307,19 @@ export const acpTransport: Transport = {
 		// Escape hatch, not a supported path. `mcode acp` has no --config, so the
 		// only lever is the shared file, held under a cross-process lock for the
 		// whole run and rolled back compare-and-swap afterwards.
-		const modelId = contextWindowModelId(plan.overrides.model);
+		const modelId = contextWindowModelId(plan.overrides.model, plan.profile);
 		if (modelId === null) {
 			throw new ConfigEditError(
 				"context_window needs to know which model to apply it to, but the configured default model " +
-					"could not be read from MiniMax Code's config.yaml. Pass `model` explicitly, or set " +
-					"MCODE_MCP_MINIMAX_CONFIG to the config's absolute path.",
+					"could not be read from MiniMax Code's config.yaml. Pass `model` explicitly" +
+					// Naming the override would be wrong advice here: with a profile in play
+					// the next call refuses it, because that config is not the one the run
+					// reads.
+					(plan.profile === null ? ", or set MCODE_MCP_MINIMAX_CONFIG to the config's absolute path." : "."),
 			);
 		}
 
-		const run = await withContextWindow(modelId, wanted, startProcess);
+		const run = await withContextWindow(modelId, wanted, plan.profile, startProcess);
 		if (run.skipped) {
 			onEvent({
 				type: "system",
@@ -330,7 +334,7 @@ export const acpTransport: Transport = {
 };
 
 function spawnRun(plan: RunPlan, ctx: CallContext, onEvent: (event: unknown) => void): Promise<RunResult> {
-	const args = agentArgs();
+	const args = agentArgs(plan.profile);
 	let handle: McodeHandle | undefined;
 	let client: AcpClient | undefined;
 
@@ -338,6 +342,7 @@ function spawnRun(plan: RunPlan, ctx: CallContext, onEvent: (event: unknown) => 
 		token: ctx.token,
 		timeoutMs: plan.timeoutMs,
 		stdin: "pipe",
+		env: childEnv(plan.profile),
 		gracefulStop: () => {
 			if (client?.id) handle?.send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId: client.id } });
 		},

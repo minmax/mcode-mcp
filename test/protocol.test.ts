@@ -38,6 +38,7 @@ describe("handshake", () => {
 			"mcode_context",
 			"mcode_history",
 			"mcode_models",
+			"mcode_profiles",
 			"mcode_reply",
 			"mcode_running",
 			"mcode_send",

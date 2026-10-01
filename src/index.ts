@@ -7,12 +7,20 @@
 import { FALLBACK_PROTOCOL, KILL_GRACE_MS, MAX_FRAME, PROTOCOL_VERSIONS, SERVER_INFO } from "./config.ts";
 import { killAllTrees, makeCancelToken, treeCount } from "./mcode-process.ts";
 import { recoverPendingContextEdit } from "./minimax-config.ts";
+import {
+	DEFAULT_PROFILE_NAME,
+	listProfiles,
+	MCODE_PROFILE_ENV_VAR,
+	PROFILE_ENV_VAR,
+	serverProfile,
+} from "./profile.ts";
 import { loadSessions } from "./sessions.ts";
 import {
 	callMcode,
 	callMcodeContext,
 	callMcodeHistory,
 	callMcodeModels,
+	callMcodeProfiles,
 	callMcodeReply,
 	callMcodeRunning,
 	callMcodeSend,
@@ -70,6 +78,7 @@ async function dispatchTool(
 	if (name === "mcode_running") return callMcodeRunning();
 	if (name === "mcode_sessions") return callMcodeSessions();
 	if (name === "mcode_history") return callMcodeHistory(args);
+	if (name === "mcode_profiles") return callMcodeProfiles();
 	return null;
 }
 
@@ -202,13 +211,43 @@ process.stdout.on("error", (err: NodeJS.ErrnoException) => {
 
 loadSessions();
 
+// A malformed profile selector is refused here rather than repaired. Falling back
+// to the default profile would look like working software while running every
+// task against the wrong account, so the server says what is wrong and stops.
+let activeProfile: string | null;
+try {
+	activeProfile = serverProfile();
+} catch (err) {
+	process.stderr.write(`mcode-mcp: ${(err as Error).message}\n`);
+	process.stderr.write(
+		`mcode-mcp: check ${PROFILE_ENV_VAR} and ${MCODE_PROFILE_ENV_VAR}. Not serving, because running on ` +
+			"the wrong account is worse than not running.\n",
+	);
+	process.exit(2);
+}
+
 // Finish a context_window rollback that a previous crash interrupted, before
 // anything reads the config this server is about to make mcode use.
-try {
-	const recovered = recoverPendingContextEdit();
-	if (recovered !== null) process.stderr.write(`mcode-mcp: ${recovered}\n`);
-} catch (err) {
-	process.stderr.write(`mcode-mcp: could not check for an unclosed config edit: ${(err as Error).message}\n`);
+//
+// Every profile, not just the one this server defaults to: the patch and its
+// sidecar are left in whichever profile's config the run was using, so recovering
+// only the default would leave a `work` run's unclosed edit in place. Left there,
+// the next run on that profile would read the stale window back as the "original"
+// value and restore that instead of the user's setting. The default profile is
+// always in the list — it is reachable through an explicit `profile: "default"`
+// even when the server defaults elsewhere — and each profile is swept once.
+const profilesToRecover = [
+	null,
+	activeProfile,
+	...listProfiles().flatMap((found) => (found.name === DEFAULT_PROFILE_NAME ? [] : [found.name])),
+].filter((name, index, all) => all.indexOf(name) === index);
+for (const profile of profilesToRecover) {
+	try {
+		const recovered = recoverPendingContextEdit(profile);
+		if (recovered !== null) process.stderr.write(`mcode-mcp: ${recovered}\n`);
+	} catch (err) {
+		process.stderr.write(`mcode-mcp: could not check for an unclosed config edit: ${(err as Error).message}\n`);
+	}
 }
 
 let buffer = "";

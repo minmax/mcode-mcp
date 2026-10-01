@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { Client, makeWorkspace, type Workspace } from "./helpers/client.ts";
+import { Client, makeWorkspace, readFakeRuns, type Workspace } from "./helpers/client.ts";
 
 let ws: Workspace;
 
@@ -126,10 +126,7 @@ describe("context_window on the print transport — the path that works", () => 
 		expect(res.isError).toBe(false);
 		expect(res.text).toContain("FINAL ANSWER");
 
-		const argv = readFileSync(argvLog, "utf8")
-			.trim()
-			.split("\n")
-			.map((l) => JSON.parse(l) as string[]);
+		const argv = readFakeRuns(argvLog).map((run) => run.argv);
 		const execCall = argv.find((a) => a[0] === "exec");
 		expect(execCall).toBeDefined();
 		const configIndex = execCall?.indexOf("--config") ?? -1;

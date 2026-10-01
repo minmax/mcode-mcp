@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { closeSync, fstatSync, openSync, readSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { asRecord } from "./parse.ts";
+import { DEFAULT_PROFILE_NAME, dataDirForProfile, profileDirExists, profileForCall } from "./profile.ts";
 import { getSession } from "./sessions.ts";
 import { expectedTranscript, findTranscript, statKey, storeRoot } from "./transcript.ts";
 import { getRun } from "./transport/registry.ts";
@@ -44,6 +45,8 @@ export interface HistoryPage {
 	session: string;
 	session_key: string;
 	cwd: string;
+	/** Profile the transcript was read from; `default` for the unsuffixed store. */
+	profile: string;
 	state: "active" | "unknown";
 	source: "native";
 	transcript: string | null;
@@ -64,6 +67,28 @@ interface Cursor {
 	b: number;
 	i: string;
 	g: string;
+	/**
+	 * Profile the page was read from. Optional, because a cursor issued before
+	 * profiles existed has none; the path check below still catches those, it just
+	 * cannot explain why.
+	 */
+	f?: string;
+}
+
+/**
+ * Whether a cursor was issued against a different profile's store.
+ *
+ * The path comparison already rejects it, but the resulting "replaced or moved"
+ * is the wrong explanation and sends a caller looking for a file problem. Checked
+ * first so the refusal names the real cause.
+ */
+function cursorProfileConflict(decoded: Cursor, profile: string): string | null {
+	if (decoded.f === undefined || decoded.f === profile) return null;
+	return (
+		`this cursor was issued for profile "${decoded.f}" and this page is profile "${profile}"; ` +
+		"a byte offset means nothing across accounts. Read the next page without a cursor, or pass the " +
+		"matching profile"
+	);
 }
 
 export interface HistoryArgs {
@@ -135,7 +160,11 @@ export function decodeCursor(raw: string, session: string): Cursor | { error: st
 	if (typeof rec.b !== "number" || !Number.isInteger(rec.b) || rec.b < 0) return { error: "invalid cursor" };
 	if (typeof rec.i !== "string" || typeof rec.g !== "string") return { error: "invalid cursor" };
 	if (rec.s !== session) return { error: "cursor belongs to a different session" };
-	return { v: 1, s: rec.s, p: rec.p, b: rec.b, i: rec.i, g: rec.g };
+	const cursor: Cursor = { v: 1, s: rec.s, p: rec.p, b: rec.b, i: rec.i, g: rec.g };
+	// Optional: a cursor issued before profiles existed has none, and the path check
+	// still refuses it — it just cannot say why.
+	if (typeof rec.f === "string") cursor.f = rec.f;
+	return cursor;
 }
 
 function clip(text: string, maxChars: number): { text: string; truncated: boolean } {
@@ -323,6 +352,7 @@ export function readHistoryFile(opts: {
 	sessionId: string;
 	sessionKey: string;
 	cwd: string;
+	profile: string;
 	path: string | null;
 	expectedPath: string;
 	storeRoot: string;
@@ -345,6 +375,7 @@ export function readHistoryFile(opts: {
 		session: opts.sessionId,
 		session_key: opts.sessionKey,
 		cwd: opts.cwd,
+		profile: opts.profile,
 		state,
 		source: "native",
 		transcript,
@@ -362,6 +393,8 @@ export function readHistoryFile(opts: {
 		if (opts.cursor !== undefined) {
 			const decoded = decodeCursor(opts.cursor, opts.sessionId);
 			if ("error" in decoded) return decoded;
+			const conflict = cursorProfileConflict(decoded, opts.profile);
+			if (conflict !== null) return { error: conflict };
 			if (!originCursor(decoded) && decoded.p !== opts.expectedPath) {
 				return { error: "transcript replaced or moved; pass no cursor to read the current file from the start" };
 			}
@@ -395,6 +428,8 @@ export function readHistoryFile(opts: {
 		if (opts.cursor !== undefined) {
 			const decoded = decodeCursor(opts.cursor, opts.sessionId);
 			if ("error" in decoded) return decoded;
+			const conflict = cursorProfileConflict(decoded, opts.profile);
+			if (conflict !== null) return { error: conflict };
 			if (!originCursor(decoded)) {
 				if (decoded.p !== resolved) {
 					return { error: "transcript replaced or moved; pass no cursor to read the current file from the start" };
@@ -514,11 +549,12 @@ export function readHistoryFile(opts: {
 			notes.push("transcript had no user message in this snapshot");
 		}
 
-		const cursor: Cursor = { v: 1, s: opts.sessionId, p: resolved, b: consumeTo, i: ino, g: gen };
+		const cursor: Cursor = { v: 1, s: opts.sessionId, p: resolved, b: consumeTo, i: ino, g: gen, f: opts.profile };
 		return {
 			session: opts.sessionId,
 			session_key: opts.sessionKey,
 			cwd: opts.cwd,
+			profile: opts.profile,
 			state,
 			source: "native",
 			transcript: resolved,
@@ -545,15 +581,37 @@ export function readMcodeHistory(input: Record<string, unknown>): HistoryPage | 
 			error: `mcode_history: unknown session ${args.session}. Use mcode_sessions to list sessions started through this server.`,
 		};
 	}
+
+	// The session's own profile, not the server's current one: a session started
+	// under `work` keeps its transcript in that account's store after the server
+	// default moves on. An explicit `profile` overrides the record, which is what
+	// recovers a transcript written before this server knew about profiles.
+	let profile: string | null;
+	try {
+		profile = profileForCall(input.profile, known?.profile);
+		// The same guard the spawning tools use. Without it a mistyped profile would
+		// report "transcript not written yet" for a session that plainly has one,
+		// which reads as a missing file rather than a wrong name.
+		if (profile !== null && !profileDirExists(profile)) {
+			throw new Error(
+				`no profile named "${profile}" — there is no data directory at ${dataDirForProfile(profile)} ` +
+					"on this machine. Check the name with mcode_profiles.",
+			);
+		}
+	} catch (err) {
+		return { error: `mcode_history: ${(err as Error).message}` };
+	}
+
 	const live = getRun(args.session) !== undefined;
-	const found = findTranscript(args.session);
+	const found = findTranscript(args.session, profile);
 	return readHistoryFile({
 		sessionId: args.session,
 		sessionKey: statKey(args.session),
 		cwd: known.cwd,
+		profile: profile ?? DEFAULT_PROFILE_NAME,
 		path: found,
-		expectedPath: expectedTranscript(args.session),
-		storeRoot: storeRoot(),
+		expectedPath: expectedTranscript(args.session, profile),
+		storeRoot: storeRoot(profile),
 		live,
 		cursor: args.cursor,
 		limit: args.limit,

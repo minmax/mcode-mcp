@@ -110,7 +110,7 @@ describe("locating the config", () => {
 describe("withContextWindow", () => {
 	it("has the value in place while the body runs, and puts the file back after", async () => {
 		let during = "";
-		const run = await withContextWindow("MiniMax-M3.1-Flash-Preview", 512_000, async () => {
+		const run = await withContextWindow("MiniMax-M3.1-Flash-Preview", 512_000, null, async () => {
 			during = read();
 			return "done";
 		});
@@ -125,7 +125,7 @@ describe("withContextWindow", () => {
 
 	it("restores even when the body throws", async () => {
 		await expect(
-			withContextWindow("MiniMax-M3", 1_000_000, async () => {
+			withContextWindow("MiniMax-M3", 1_000_000, null, async () => {
 				throw new Error("boom");
 			}),
 		).rejects.toThrow("boom");
@@ -134,7 +134,7 @@ describe("withContextWindow", () => {
 	});
 
 	it("leaves the file alone when somebody else changed the entry mid-run", async () => {
-		const run = await withContextWindow("MiniMax-M3", 1_000_000, async () => {
+		const run = await withContextWindow("MiniMax-M3", 1_000_000, null, async () => {
 			// The TUI, or a person, picked a different window while we were running.
 			const edit = setContextLimit(read(), "MiniMax-M3", 999_000);
 			writeConfig(edit.text);
@@ -149,7 +149,7 @@ describe("withContextWindow", () => {
 		writeConfig(`${ORIGINAL}minimaxModelContextLimits:\n  MiniMax-M3: 512000\n`);
 		const before = read();
 
-		const run = await withContextWindow("MiniMax-M3", 1_000_000, async () => "done");
+		const run = await withContextWindow("MiniMax-M3", 1_000_000, null, async () => "done");
 
 		expect(run.restored).toBe(true);
 		expect(read()).toBe(before);
@@ -159,7 +159,9 @@ describe("withContextWindow", () => {
 		const inline = `${ORIGINAL}minimaxModelContextLimits: {MiniMax-M3: 512000}\n`;
 		writeConfig(inline);
 
-		await expect(withContextWindow("MiniMax-M3", 1_000_000, async () => "never")).rejects.toThrow(ConfigEditError);
+		await expect(withContextWindow("MiniMax-M3", 1_000_000, null, async () => "never")).rejects.toThrow(
+			ConfigEditError,
+		);
 		expect(read()).toBe(inline);
 	});
 
@@ -175,8 +177,8 @@ describe("withContextWindow", () => {
 		};
 
 		const [a, b] = await Promise.all([
-			withContextWindow("MiniMax-M3", 100_001, body("a", 100_001)),
-			withContextWindow("MiniMax-M3", 200_002, body("b", 200_002)),
+			withContextWindow("MiniMax-M3", 100_001, null, body("a", 100_001)),
+			withContextWindow("MiniMax-M3", 200_002, null, body("b", 200_002)),
 		]);
 
 		expect(a.value).toBe("a");
@@ -189,7 +191,7 @@ describe("withContextWindow", () => {
 		// mcode ignores a window its model does not advertise. This server cannot
 		// see the catalog before the process starts, so the honest thing is for
 		// the caller to be able to check afterwards with mcode_context.
-		const run = await withContextWindow("MiniMax-M3", 777, async () => "done");
+		const run = await withContextWindow("MiniMax-M3", 777, null, async () => "done");
 		expect(run.value).toBe("done");
 		expect(read()).toBe(ORIGINAL);
 	});
@@ -269,13 +271,13 @@ describe("crash recovery", () => {
 
 describe("the cross-process lock", () => {
 	it("is released when the run finishes", async () => {
-		await withContextWindow("MiniMax-M3", 1_000_000, async () => "done");
+		await withContextWindow("MiniMax-M3", 1_000_000, null, async () => "done");
 		expect(existsSync(lockPath())).toBe(false);
 	});
 
 	it("is released even when the run throws", async () => {
 		await expect(
-			withContextWindow("MiniMax-M3", 1_000_000, async () => {
+			withContextWindow("MiniMax-M3", 1_000_000, null, async () => {
 				throw new Error("boom");
 			}),
 		).rejects.toThrow("boom");
@@ -287,7 +289,7 @@ describe("the cross-process lock", () => {
 		// whole turn, and the lock is judged by that owner being alive, not by age.
 		writeFileSync(lockPath(), `${process.pid}:someone-else\n`);
 		const started = Date.now();
-		await expect(withContextWindow("MiniMax-M3", 1_000_000, async () => "never")).rejects.toThrow(
+		await expect(withContextWindow("MiniMax-M3", 1_000_000, null, async () => "never")).rejects.toThrow(
 			/context_window turn/,
 		);
 		expect(Date.now() - started).toBeLessThan(20_000);
@@ -301,7 +303,7 @@ describe("the cross-process lock", () => {
 	it("reaps a lock whose owner is gone, however young it is", async () => {
 		writeFileSync(lockPath(), `${deadPid()}:ghost\n`);
 
-		const run = await withContextWindow("MiniMax-M3", 1_000_000, async () => "done");
+		const run = await withContextWindow("MiniMax-M3", 1_000_000, null, async () => "done");
 
 		expect(run.value).toBe("done");
 		expect(read()).toBe(ORIGINAL);
@@ -313,7 +315,7 @@ describe("the cross-process lock", () => {
 		// upper bound above, so the lower bound is asserted too.
 		writeFileSync(lockPath(), `${process.pid}:someone-else\n`);
 		const started = Date.now();
-		await expect(withContextWindow("MiniMax-M3", 1_000_000, async () => "never")).rejects.toThrow();
+		await expect(withContextWindow("MiniMax-M3", 1_000_000, null, async () => "never")).rejects.toThrow();
 		expect(Date.now() - started).toBeGreaterThan(3_000);
 		rmSync(lockPath(), { force: true });
 	});
@@ -327,7 +329,7 @@ describe("two server processes on one config", () => {
 		const script = `
 			import { withContextWindow } from ${JSON.stringify(new URL("../src/minimax-config.ts", import.meta.url).href)};
 			const [modelId, value, holdMs] = process.argv.slice(2);
-			const run = await withContextWindow(modelId, Number(value), async () => {
+			const run = await withContextWindow(modelId, Number(value), null, async () => {
 				await new Promise((r) => setTimeout(r, Number(holdMs)));
 				return "second";
 			});
@@ -358,7 +360,7 @@ describe("two server processes on one config", () => {
 			});
 
 		// First instance takes the lock and holds it while it "runs".
-		const first = withContextWindow("MiniMax-M3", 2_000_000, async () => {
+		const first = withContextWindow("MiniMax-M3", 2_000_000, null, async () => {
 			// Give the second process time to start and find the lock held.
 			await new Promise((r) => setTimeout(r, 1_500));
 			expect(read()).toContain("MiniMax-M3: 2000000");
@@ -379,7 +381,7 @@ describe("two server processes on one config", () => {
 describe("withTempContextConfig", () => {
 	it("hands the body a private copy and never touches the original", async () => {
 		let seen = "";
-		await withTempContextConfig("MiniMax-M3.1-Flash-Preview", 1_000_000, async (path) => {
+		await withTempContextConfig("MiniMax-M3.1-Flash-Preview", 1_000_000, null, async (path) => {
 			seen = readFileSync(path, "utf8");
 			expect(existsSync(path)).toBe(true);
 			// The copy is what mcode is pointed at, so it must carry the value.
@@ -391,7 +393,7 @@ describe("withTempContextConfig", () => {
 	});
 
 	it("keeps the rest of the config, since mcode needs its whole runtime config", async () => {
-		await withTempContextConfig("MiniMax-M3", 1_000_000, async (path) => {
+		await withTempContextConfig("MiniMax-M3", 1_000_000, null, async (path) => {
 			const copy = readFileSync(path, "utf8");
 			expect(copy).toContain("defaultModel: minimax/MiniMax-M3.1-Flash-Preview");
 			expect(copy).toContain("# keep me");
@@ -401,7 +403,7 @@ describe("withTempContextConfig", () => {
 
 	it("removes the temporary copy afterwards", async () => {
 		let path = "";
-		await withTempContextConfig("MiniMax-M3", 1_000_000, async (p) => {
+		await withTempContextConfig("MiniMax-M3", 1_000_000, null, async (p) => {
 			path = p;
 			return undefined;
 		});
@@ -411,7 +413,7 @@ describe("withTempContextConfig", () => {
 
 	it("refuses rather than writing when the config is in a form it cannot edit", async () => {
 		writeConfig(`${ORIGINAL}minimaxModelContextLimits: 512000\n`);
-		await expect(withTempContextConfig("MiniMax-M3", 1_000_000, async () => "never")).rejects.toThrow(
+		await expect(withTempContextConfig("MiniMax-M3", 1_000_000, null, async () => "never")).rejects.toThrow(
 			ConfigEditError,
 		);
 		expect(read()).toBe(`${ORIGINAL}minimaxModelContextLimits: 512000\n`);

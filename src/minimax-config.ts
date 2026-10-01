@@ -38,7 +38,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseModelTarget } from "./model-ref.ts";
-import { dataDir } from "./transcript.ts";
+import { dataDirForProfile } from "./profile.ts";
 
 const CONTEXT_LIMITS_KEY = "minimaxModelContextLimits";
 // A crash between patching the config and putting it back would leave the user's
@@ -162,15 +162,41 @@ function sidecarIsLive(record: { pid?: unknown; createdAt?: unknown }): boolean 
 /**
  * Where MiniMax Code keeps its config. Upstream resolves this from a chain of
  * env vars plus git-based auto-detection that is not worth reimplementing here,
- * so the env var is an explicit escape hatch and the common case is the default
- * profile directory. We only ever write to a path that already exists.
+ * so the env var is an explicit escape hatch and the common case is the profile
+ * directory. We only ever write to a path that already exists.
+ *
+ * `MCODE_MCP_MINIMAX_CONFIG` is deliberately a single path with no profile
+ * indirection: it exists to point this server at a config the standard chain
+ * cannot find, and a second way to select a profile's file would make the
+ * override ambiguous rather than more capable.
  */
-export function resolveConfigPath(): string | null {
-	const override = process.env.MCODE_MCP_MINIMAX_CONFIG?.trim();
+export function resolveConfigPath(profile: string | null = null): string | null {
+	const override = configPathOverride();
 	if (override) return existsSync(override) ? override : null;
 
-	const candidate = join(dataDir(), "config.yaml");
+	const candidate = join(dataDirForProfile(profile), "config.yaml");
 	return existsSync(candidate) ? candidate : null;
+}
+
+function configPathOverride(): string | null {
+	const override = process.env.MCODE_MCP_MINIMAX_CONFIG?.trim();
+	return override === undefined || override === "" ? null : override;
+}
+
+/**
+ * The override names one file, while `mcode --profile <name>` reads
+ * `<profileDir>/config.yaml`. Editing the named file would therefore do nothing
+ * the run can see — silently, because the write succeeds and the window does not
+ * move. Refused rather than attempted, and the caller is told both ways out.
+ */
+export function assertNoConfigOverrideWithProfile(profile: string | null): void {
+	const override = configPathOverride();
+	if (override === null || profile === null) return;
+	throw new ConfigEditError(
+		`MCODE_MCP_MINIMAX_CONFIG points at ${override}, but profile "${profile}" reads its own ` +
+			`config.yaml at ${join(dataDirForProfile(profile), "config.yaml")}, so editing the named file would ` +
+			"not change the run. Unset MCODE_MCP_MINIMAX_CONFIG, or run this call on the default profile.",
+	);
 }
 
 // ---------------------------------------------------------------------------
@@ -496,11 +522,16 @@ export function readDefaultModelId(text: string): string | null {
 	return null;
 }
 
-export function contextWindowModelId(model: string | undefined): string | null {
+export function contextWindowModelId(model: string | undefined, profile: string | null = null): string | null {
+	// Checked here as well as in the edit itself: both transports resolve the model
+	// before they edit, and the "could not read the default model" error tells the
+	// caller to set MCODE_MCP_MINIMAX_CONFIG — advice the next call would reject
+	// outright, so it must not be reachable first.
+	assertNoConfigOverrideWithProfile(profile);
 	if (model !== undefined && model !== "") {
 		return parseModelTarget(model)?.modelId ?? null;
 	}
-	const path = resolveConfigPath();
+	const path = resolveConfigPath(profile);
 	if (path === null) return null;
 	try {
 		return readDefaultModelId(readFileSync(path, "utf8"));
@@ -571,8 +602,10 @@ function clearPending(configPath: string): void {
  * acts when the sidecar exists *and* the entry still holds the value we wrote,
  * so a real user change is never overwritten. Returns a note when it acted.
  */
-export function recoverPendingContextEdit(): string | null {
-	const configPath = resolveConfigPath();
+export function recoverPendingContextEdit(profile: string | null = null): string | null {
+	// Recovery is a read of the file to restore, not an edit, so an override is
+	// fine here: the question is which file holds an unclosed patch.
+	const configPath = resolveConfigPath(profile);
 	if (configPath === null) return null;
 	const pending = pendingPath(configPath);
 	if (!existsSync(pending)) return null;
@@ -658,10 +691,12 @@ function serialize<T>(fn: () => Promise<T>): Promise<T> {
 export function withContextWindow<T>(
 	modelId: string,
 	value: number,
+	profile: string | null,
 	fn: () => Promise<T>,
 ): Promise<ContextWindowRun<T>> {
 	return serialize(async () => {
-		const path = resolveConfigPath();
+		assertNoConfigOverrideWithProfile(profile);
+		const path = resolveConfigPath(profile);
 		if (path === null) {
 			throw new ConfigEditError(
 				"could not locate MiniMax Code's config.yaml, so the context window cannot be set. " +
@@ -747,9 +782,11 @@ async function runHeld<T>(
 export async function withTempContextConfig<T>(
 	modelId: string,
 	value: number,
+	profile: string | null,
 	fn: (configPath: string) => Promise<T>,
 ): Promise<T> {
-	const source = resolveConfigPath();
+	assertNoConfigOverrideWithProfile(profile);
+	const source = resolveConfigPath(profile);
 	if (source === null) {
 		throw new ConfigEditError(
 			"could not locate MiniMax Code's config.yaml, so a copy of it cannot be made for --config. " +

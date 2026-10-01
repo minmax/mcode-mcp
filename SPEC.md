@@ -65,10 +65,28 @@ This is **not** the MiniMax M3 API provider in Pi, and **not** `mmx-cli`.
 
 ## 5. Tools
 
-`mcode`, `mcode_reply`, `mcode_models`, `mcode_send`, `mcode_running`, `mcode_sessions`, `mcode_history`.
+`mcode`, `mcode_reply`, `mcode_models`, `mcode_context`, `mcode_send`, `mcode_running`, `mcode_sessions`, `mcode_history`, `mcode_profiles`.
 
 Answers keep `[session: <id>]` and also `[session-key: mcode:<id>]`. The last transport is remembered so `mcode_reply` without an explicit `transport` resumes on the same wire, and `mcode_send` / `mcode_running` do not blame print after an ACP turn.
 
 Unsupported (honest error): `follow_up`, `effort`, `allowed_tools`, `system_prompt_append`, `permission=ask`, `mode`/`thinking_effort` on print, `permission=off` on ACP.
 
-`mcode_history` reads native `messages.jsonl` at `<dataDir>/v2/sessions/YYYY/MM/DD/<time>-session_<b64(id)>/messages.jsonl` (MINIMAX_DATA_DIR / MAVIS_DATA_DIR / `~/.minimax`). Thinking and image binaries are omitted.
+`mcode_history` reads native `messages.jsonl` at `<dataDir>/v2/sessions/YYYY/MM/DD/<time>-session_<b64(id)>/messages.jsonl` (MINIMAX_DATA_DIR / MAVIS_DATA_DIR / `~/.minimax[-<profile>]`). Thinking and image binaries are omitted.
+
+## 6. Auth profiles
+
+A profile is mcode's own isolation unit: `~/.minimax` for the implicit default and `~/.minimax-<name>` for a named one, each with its own credentials, sessions and settings. The wire is mcode's `--profile <name>` on every command; `MINIMAX_PROFILE` is its public selector. **Requires a MiniMax Code that has them (0.6.0-era) — the rest of this document is verified against 0.3.11/0.5.9.** Naming a profile on a build without it fails with mcode's own unknown-option error, and the default path is untouched.
+
+Three rules this adapter adds, because it *reads* the data directory and not only writes to it:
+
+1. **One resolution, used for both.** The account a run uses and the store it is read back from are resolved by the same function, with mcode's own precedence — an explicit `MINIMAX_DATA_DIR` / `MAVIS_DATA_DIR` outranks the profile. A guess that disagreed with mcode would be a silent wrong-account read.
+2. **The profile is pinned into the child environment**, so an inherited `MINIMAX_PROFILE` cannot be a second, disagreeing source of truth for a server that passed `process.env` through. A relative `MINIMAX_DATA_DIR` is pinned to its absolute form for the same reason.
+3. **A session is pinned to the account it was created in.** `mcode_reply` may not change it — a session id only names a conversation inside one account — while `mcode_history` and `mcode_context` may read across accounts, because those are reads.
+
+Names are validated, never repaired: 1–64 chars, alphanumeric at both ends, and a separator would redirect the credential store out of the user's home. `default` is the implicit profile, not an ordinary name.
+
+Server default: `MCODE_MCP_PROFILE`, then `MINIMAX_PROFILE`. A malformed value stops startup — falling back would bill the wrong account.
+
+### The one place this adapter does not just pass mcode through
+
+`mcode_profiles` lists profiles by walking the home directory rather than by running `mcode profile list --json`. The CLI command costs a cold start per call and exists only on a build that has profiles, and the server has to work against one that does not. The cost is that the credential layout it inspects — `auth/**/auth.json` for OAuth, an `apiKey:` line in `config.yaml` for a Token Plan key, `auth-state.json` for a sign-in in flight — is a copy of an implementation detail. Both credential kinds are reported, because calling an API-key profile "signed out" would send the agent away from a working account. A directory is only listed when it actually holds data, which is what keeps the installer prefix `~/.minimax-code` from being offered as a profile named `code`.

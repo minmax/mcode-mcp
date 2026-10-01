@@ -72,6 +72,7 @@ model sees.
 | `mcode_running` | List turns executing right now that `mcode_send` can reach. |
 | `mcode_sessions` | List known sessions started through this server, newest first. |
 | `mcode_history` | Read-only native transcript (`messages.jsonl`). Does not prompt the agent. |
+| `mcode_profiles` | List the auth profiles on this machine and which one is the default. |
 
 ### `mcode`
 
@@ -86,6 +87,63 @@ model sees.
 | `context_window` | Context window in tokens (M3 / M3.1 advertise `512000` and `1000000`; the latter is marked `higher_usage`). See the note below. |
 | `transport` | `acp` (default) or `print`. Usually omit. |
 | `timeout_ms` | Wall clock for this run. Off unless you set it. Print also forwards `--timeout <N>ms`. |
+| `profile` | Named auth profile. See the section below. On `mcode_reply`, `mcode_history` and `mcode_context` it defaults to the profile the session was started under. |
+
+### `profile`
+
+A profile is a separate MiniMax account with its own data directory —
+`~/.minimax` for the default one, `~/.minimax-<name>` for a named one — holding
+its own credentials, sessions and settings. It is mcode's own feature; this
+server passes it through with the same `--profile <name>` flag and resolves its
+own paths with the same arithmetic, so a run and the transcript read back
+afterwards can never disagree about which account they belong to.
+
+```js
+mcode_profiles()                       // what exists, and what is signed in
+mcode({ prompt: "…", profile: "work" }) // a task on the `work` account
+```
+
+Names must be 1–64 letters, numbers, dots, underscores or hyphens, starting and
+ending with a letter or number — a name becomes a directory segment under your
+home, so `../../etc` is refused rather than sanitised. `default` means the
+default profile explicitly; it does not name a `~/.minimax-default` account.
+
+**The server's default** is `MCODE_MCP_PROFILE`, falling back to mcode's own
+`MINIMAX_PROFILE` if that is set and ours is not. A malformed value makes the
+server refuse to start instead of quietly falling back to the default account —
+running every task on the wrong account is worse than not running. The chosen
+profile is pinned into the environment of every mcode this server spawns, so an
+inherited `MINIMAX_PROFILE` can never send a run to an account other than the one
+this server reads from.
+
+Two things to know before using one:
+
+- **A profile must have credentials first.** Signing in is interactive and has no
+  headless equivalent, so do it in a terminal with `mcode login --profile <name>`
+  (or give it a Token Plan key with `mcode provider set-minimax-key --profile
+  <name>`). Until then `mcode_profiles` reports `signed out` or `not created`, and
+  a run against it cannot authenticate.
+- **`MINIMAX_DATA_DIR` / `MAVIS_DATA_DIR` outranks the profile**, exactly as it
+  does in mcode: with either set, every profile resolves to that one directory
+  and they stop being separate accounts. `mcode_profiles` says so when it detects
+  this. `MCODE_MCP_MINIMAX_CONFIG` is likewise a single path with no profile
+  indirection, and combining it with a named profile is refused: the run would
+  read the profile's own `config.yaml`, so the edit would succeed and the context
+  window would not move.
+
+An answer from a non-default profile carries `[profile: <name>]` in its prefix.
+
+A session keeps the profile it started under, and **it cannot be changed by a
+reply** — a session id only names a conversation inside one account, so
+`mcode_reply` refuses a different `profile` rather than asking another account to
+load an id it never issued. `mcode_history` and `mcode_context` may read a session
+from another account, since those are reads; `mcode_history` reports the profile
+it read, and a cursor issued for one profile is refused in another, because a byte
+offset means nothing across accounts. Note that a `context_window` edit is a real
+write to that profile's `config.yaml`.
+
+A profile name that has no directory is refused before anything starts, rather
+than letting mcode create an empty account for it.
 
 ### `context_window`
 
@@ -156,7 +214,9 @@ Read-only snapshot of the native transcript. Does not prompt mcode.
 mcode_history({ session: "<id from the prefix>" })
 ```
 
-Source: `<MINIMAX_DATA_DIR|~/.minimax>/v2/sessions/YYYY/MM/DD/<time>-session_<base64(id)>/messages.jsonl`.
+Source: `<dataDir>/v2/sessions/YYYY/MM/DD/<time>-session_<base64(id)>/messages.jsonl`, where
+`<dataDir>` is `MINIMAX_DATA_DIR`, then `MAVIS_DATA_DIR`, then `~/.minimax[-<profile>]`
+for the session's own profile. The page reports the profile it read.
 Items are `user` / `assistant` / `tool` / `gap`. Thinking and image binaries are
 omitted. Pass `cursor` from the previous page to continue; `include_tools: false`
 hides tool calls/results but still advances the cursor.

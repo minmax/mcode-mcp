@@ -117,6 +117,33 @@ export function makeFakeBin(dir: string): string {
 	return bin;
 }
 
+/** One spawn recorded by the fake mcode, with the environment it actually received. */
+export interface FakeRun {
+	argv: string[];
+	profileEnv: string | null;
+	dataDir: string;
+}
+
+/**
+ * Parse the fake's spawn log.
+ *
+ * A missing file means the fake never ran, which is a result in its own right —
+ * so it reads as an empty list rather than throwing.
+ */
+export function readFakeRuns(path: string): FakeRun[] {
+	let raw: string;
+	try {
+		raw = readFileSync(path, "utf8");
+	} catch {
+		return [];
+	}
+	return raw
+		.trim()
+		.split("\n")
+		.filter((line) => line.trim() !== "")
+		.map((line) => JSON.parse(line) as FakeRun);
+}
+
 export interface Workspace {
 	dir: string;
 	bin: string;

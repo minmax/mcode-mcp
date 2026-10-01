@@ -21,7 +21,12 @@ if (process.env.FAKE_STARTED_FILE) {
 	appendFileSync(process.env.FAKE_STARTED_FILE, `${process.pid}\n`);
 }
 if (process.env.FAKE_ARGV_LOG) {
-	appendFileSync(process.env.FAKE_ARGV_LOG, `${JSON.stringify(argv)}\n`);
+	// The environment as the child received it, not as the server wrote it: this is
+	// what proves the adapter pinned the profile the child actually runs under.
+	appendFileSync(
+		process.env.FAKE_ARGV_LOG,
+		`${JSON.stringify({ argv, profileEnv: process.env.MINIMAX_PROFILE ?? null, dataDir: fakeDataDir() })}\n`,
+	);
 }
 
 function argValue(flag) {
@@ -132,15 +137,21 @@ function effectiveContextWindow() {
 	return FAKE_BASE_CONTEXT;
 }
 
+// mcode's own order: an explicit data dir outranks the profile, and the profile
+// only decides the default directory name. `MINIMAX_PROFILE` is read as well as
+// `--profile` because the adapter pins both and a test needs to see the variable
+// reach the child.
+function fakeDataDir() {
+	const dataDir = process.env.MINIMAX_DATA_DIR ?? process.env.MAVIS_DATA_DIR;
+	if (dataDir) return dataDir;
+	const profile = argValue("--profile") ?? process.env.MINIMAX_PROFILE;
+	return join(homedir(), profile ? `.minimax-${profile}` : ".minimax");
+}
+
 function fakeConfigPath() {
 	const explicit = process.env.MCODE_MCP_MINIMAX_CONFIG;
 	if (explicit) return existsSync(explicit) ? explicit : undefined;
-	const dataDir = process.env.MINIMAX_DATA_DIR;
-	if (dataDir) {
-		const candidate = join(dataDir, "config.yaml");
-		return existsSync(candidate) ? candidate : undefined;
-	}
-	const candidate = join(homedir(), ".minimax", "config.yaml");
+	const candidate = join(fakeDataDir(), "config.yaml");
 	return existsSync(candidate) ? candidate : undefined;
 }
 
