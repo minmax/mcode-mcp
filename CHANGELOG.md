@@ -2,7 +2,7 @@
 
 What changed in behaviour, in the order it shipped. Dates are publish dates from the registry.
 
-## Unreleased
+## 0.3.0 — 2026-10-01
 
 - **Named auth profiles.** `profile` on `mcode`, `mcode_reply`, `mcode_models`, `mcode_context` and `mcode_history` selects a MiniMax Code account — its own credentials, sessions and settings in `~/.minimax-<name>`. The flag is mcode's own `--profile <name>`, and this server resolves its paths with mcode's own arithmetic, so a run and the transcript read back afterwards cannot disagree about which account they used. Requires a MiniMax Code with profile support (their `feat/auth-profiles` line, 0.6.0-era); without one, naming a profile fails with mcode's own unknown-option error and the default path is untouched.
 - **The server's default profile is `MCODE_MCP_PROFILE`**, falling back to mcode's `MINIMAX_PROFILE`. The resolved value is pinned into every spawned mcode's environment, so a `MINIMAX_PROFILE` inherited from the server's own shell can no longer send runs to an account the server is not reading from. A malformed value makes the server refuse to start rather than quietly run on the default account.
