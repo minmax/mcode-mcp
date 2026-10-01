@@ -80,7 +80,7 @@ const DATA_DIR_ENTRIES = [
 ];
 
 /** Every tool name starts with this, so a profile-prefixed name is still ours. */
-export const TOOL_FAMILY = "mcode";
+const TOOL_FAMILY = "mcode";
 
 const DATA_DIR_BASENAME = ".minimax";
 const LEGACY_DATA_DIR_BASENAME = ".mavis";
@@ -499,33 +499,6 @@ export function listProfiles(env: NodeJS.ProcessEnv = process.env): DiscoveredPr
 }
 
 /**
- * One line describing whether this profile can answer.
- *
- * A live credential outranks a pending authorization: a stored OAuth token whose
- * `auth-state.json` still says `refreshing` is a signed-in account, and calling
- * it pending would tell the agent to go and sign in again for no reason. The
- * pending state is only reported when there is nothing usable to wait for.
- */
-/**
- * Whether profiles are worth putting in front of the caller at all.
- *
- * A user on a build of MiniMax Code without profile support, who has never named a
- * profile, should see the tool surface they had before this feature existed — not a
- * parameter that can only fail and a tool that lists nothing. So the answer is only
- * yes when a profile can actually change what a call does: the server has been
- * pointed at one, or one exists on disk.
- *
- * This decides what is *advertised*, never what is *honoured*: a caller that passes
- * `profile` is obeyed either way, because a client that knows about the feature
- * should not be second-guessed by what this machine happens to have.
- */
-export function profilesAvailable(env: NodeJS.ProcessEnv = process.env): boolean {
-	if ((env[PROFILE_ENV_VAR]?.trim() ?? "") !== "") return true;
-	if ((env[MCODE_PROFILE_ENV_VAR]?.trim() ?? "") !== "") return true;
-	return listProfiles(env).some((profile) => profile.name !== DEFAULT_PROFILE_NAME);
-}
-
-/**
  * The account one call runs under, as encoded in the tool's own name.
  *
  * A profile is a segment of the tool name rather than an argument, which is what
@@ -556,32 +529,6 @@ export function toolName(action: string, profile: string | null): string {
 }
 
 /**
- * Read a tool name back into the action and the profile it pins.
- *
- * `actions` is the set of tools that get a per-profile variant, and `profiles` the
- * names to look for. Longest profile name first, so a profile called `work_2` is
- * not read as profile `work` calling a `2_reply` that does not exist. Only a name
- * that resolves to a real action and a real profile resolves at all — anything else
- * is an unknown tool, which is what it was before profiles existed.
- */
-export function resolveToolTarget(name: string, actions: string[], profiles: string[]): ToolTarget | null {
-	if (!name.startsWith(`${TOOL_FAMILY}_`) && name !== TOOL_FAMILY) return null;
-	if (actions.includes(name)) return { action: name, profile: null };
-
-	const rest = name === TOOL_FAMILY ? "" : name.slice(TOOL_FAMILY.length + 1);
-	if (rest === "") return null;
-
-	const byLength = [...profiles].sort((left, right) => right.length - left.length);
-	for (const profile of byLength) {
-		if (rest === profile) return { action: TOOL_FAMILY, profile };
-		if (!rest.startsWith(`${profile}_`)) continue;
-		const action = `${TOOL_FAMILY}_${rest.slice(profile.length + 1)}`;
-		if (actions.includes(action)) return { action, profile };
-	}
-	return null;
-}
-
-/**
  * The profile one call runs under: the one its own tool name pins it to, or the
  * session's recorded profile, or the server default.
  *
@@ -591,11 +538,19 @@ export function resolveToolTarget(name: string, actions: string[], profiles: str
  * corrupt record would resolve to whichever account the server now defaults to.
  */
 export function callProfile(target: ToolTarget, known?: string | undefined): string | null {
-	if (target.profile !== null) return target.profile;
+	// Through the selector, so the tool that names `default` explicitly means the
+	// implicit account and not a `~/.minimax-default` directory.
+	if (target.profile !== null) return normalizeProfileSelector(target.profile);
 	return profileForCall(undefined, known);
 }
 
-/** Profile names a caller can address right now. */
+/**
+ * Profile names a caller can address right now.
+ *
+ * `default` is among them only once the server's default has moved elsewhere: the
+ * untargeted tools then run on that account, and without a tool of its own the
+ * implicit account would be unreachable for a new run.
+ */
 export function selectableProfiles(env: NodeJS.ProcessEnv = process.env): string[] {
 	const names = new Set(
 		listProfiles(env).flatMap((found) => (found.name === DEFAULT_PROFILE_NAME ? [] : [found.name])),
@@ -603,14 +558,25 @@ export function selectableProfiles(env: NodeJS.ProcessEnv = process.env): string
 	// A profile the server has been pointed at but not yet created still gets a tool.
 	// Otherwise setting the variable would produce a server whose default has no way
 	// to be addressed at all, and the tool that explains how to fix that is one call
-	// away — behind the tool that cannot work.
-	for (const candidate of [env[PROFILE_ENV_VAR], env[MCODE_PROFILE_ENV_VAR]]) {
-		const profile = normalizeProfileSelector(candidate);
-		if (profile !== null) names.add(profile);
+	// away — behind the tool that cannot work. Only the profile the server actually
+	// defaults to: the losing variable of the two is never consulted, so it may be
+	// anything, including a value startup validation did not look at.
+	const pointed = serverProfile(env);
+	if (pointed !== null) {
+		names.add(pointed);
+		names.add(DEFAULT_PROFILE_NAME);
 	}
 	return [...names].sort();
 }
 
+/**
+ * One line describing whether this profile can answer.
+ *
+ * A live credential outranks a pending authorization: a stored OAuth token whose
+ * `auth-state.json` still says `refreshing` is a signed-in account, and calling
+ * it pending would tell the agent to go and sign in again for no reason. The
+ * pending state is only reported when there is nothing usable to wait for.
+ */
 export function describeProfileState(profile: DiscoveredProfile): string {
 	if (profile.credentials === "none" && profile.pendingAuthorization) return "authorization pending";
 	if (profile.credentials === "oauth") return "signed in (OAuth)";

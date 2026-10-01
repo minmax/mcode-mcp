@@ -25,6 +25,7 @@ import {
 	callMcodeRunning,
 	callMcodeSend,
 	callMcodeSessions,
+	profileArgumentError,
 	resolveCall,
 	toolDefinitions,
 	toolResult,
@@ -76,6 +77,8 @@ async function dispatchTool(
 	// argument can redirect a call to another account.
 	const target = resolveCall(String(name));
 	if (target === null) return null;
+	const misdirected = profileArgumentError(target, args);
+	if (misdirected !== null) return misdirected;
 	switch (target.action) {
 		case "mcode":
 			return callMcode(args, ctx, target);

@@ -441,9 +441,7 @@ describe("what is advertised", () => {
 		}
 	});
 
-	it("picks the longest matching profile, so a name ending in a digit still works", async () => {
-		// A profile called `work_2` must not be read as profile `work` calling a
-		// `2_reply` that does not exist.
+	it("keeps a profile whose name ends in a digit addressable next to its prefix", async () => {
 		seedCredentials(join(home, ".minimax-work"));
 		seedCredentials(join(home, ".minimax-work_2"));
 		const listed = await names();
@@ -482,17 +480,85 @@ describe("what is advertised", () => {
 		]);
 	});
 
-	it("cannot be redirected by a `profile` argument any more", async () => {
+	it("refuses a `profile` argument instead of quietly running on another account", async () => {
 		seedCredentials(join(home, ".minimax-work"));
+		seedCredentials(join(home, ".minimax-personal"));
 		const argvLog = join(home, "argv.log");
 		client = new Client({ ...ws.env, FAKE_ARGV_LOG: argvLog }, ws.dir);
 		await client.handshake();
-		// The name is settled before any argument is read, so a stray argument cannot
-		// move a call onto another account.
-		const res = await client.tool("mcode_work", { prompt: "do it", profile: "personal" });
+		// A caller that still knows the old schema asked for an account. Ignoring the
+		// argument would bill the default one; naming it on a pinned tool must not
+		// move the call either.
+		for (const name of ["mcode", "mcode_work", "mcode_work_history"]) {
+			const res = await client.tool(name, { prompt: "do it", session: "x", profile: "personal" });
+			expect(res.isError, name).toBe(true);
+			expect(res.text, name).toContain("no `profile` argument");
+		}
+		expect(readFakeRuns(argvLog)).toEqual([]);
+	});
+
+	it("leaves a stray `profile` argument alone when no profile is in play", async () => {
+		// The 0.2.0 surface, including ignoring what it never declared.
+		const argvLog = join(home, "argv.log");
+		client = new Client({ ...ws.env, FAKE_ARGV_LOG: argvLog }, ws.dir);
+		await client.handshake();
+		const res = await client.tool("mcode", { prompt: "do it", profile: "work" });
 		expect(res.isError).toBe(false);
-		expect(res.text).toContain("[profile: work]");
-		expect(readFakeRuns(argvLog)[0]?.argv.slice(0, 3)).toEqual(["acp", "--profile", "work"]);
+		expect(readFakeRuns(argvLog)[0]?.argv.slice(0, 2)).toEqual(["acp"]);
+	});
+
+	it("gives the default account a tool once the server default has moved off it", async () => {
+		seedCredentials(join(home, ".minimax-work"));
+		const argvLog = join(home, "argv.log");
+		client = new Client({ ...ws.env, FAKE_ARGV_LOG: argvLog, MCODE_MCP_PROFILE: "work" }, ws.dir);
+		await client.handshake();
+		const listed = (await client.toolList()).map((tool) => tool.name);
+		expect(listed).toContain("mcode_default");
+		expect(listed).toContain("mcode_default_reply");
+
+		const onDefault = await client.tool("mcode_default", { prompt: "a" });
+		const untargeted = await client.tool("mcode", { prompt: "b" });
+		expect(onDefault.text).not.toContain("[profile:");
+		expect(untargeted.text).toContain("[profile: work]");
+		expect(readFakeRuns(argvLog).map((run) => run.argv.slice(0, 3))).toEqual([["acp"], ["acp", "--profile", "work"]]);
+	});
+
+	it("does not trip on the variable that is not the default", async () => {
+		// Only the winning variable is validated at startup, so the other one can be
+		// anything and must not take tools/list down.
+		seedCredentials(join(home, ".minimax-work"));
+		const listed = await names({ MCODE_MCP_PROFILE: "work", MINIMAX_PROFILE: "../../etc" });
+		expect(listed).toContain("mcode_work");
+		expect(listed.some((name) => name.includes("etc"))).toBe(false);
+	});
+
+	it("never advertises two tools under one name, or one that would run on the wrong account", async () => {
+		// `work_reply` next to `work`: both would be `mcode_work_reply`. `reply` and
+		// `models` would be the base tools' own names. A dot is not a portable tool name.
+		for (const profile of ["work", "work_reply", "reply", "models", "a.b"]) {
+			seedCredentials(join(home, `.minimax-${profile}`));
+		}
+		const listed = await names();
+		expect(new Set(listed).size).toBe(listed.length);
+		expect(listed).toContain("mcode_work_reply");
+		expect(listed).toContain("mcode_work_history");
+		expect(listed).not.toContain("mcode_work_reply_history");
+		expect(listed.filter((name) => /[^A-Za-z0-9_-]/.test(name))).toEqual([]);
+
+		// The surviving `mcode_work_reply` is `work`'s reply, never a task on `work_reply`.
+		const argvLog = join(home, "argv.log");
+		client = new Client({ ...ws.env, FAKE_ARGV_LOG: argvLog }, ws.dir);
+		await client.handshake();
+		const started = await client.tool("mcode_work", { prompt: "a" });
+		const replied = await client.tool("mcode_work_reply", { session: sessionIdOf(started.text), prompt: "b" });
+		expect(replied.isError).toBe(false);
+		expect(readFakeRuns(argvLog).map((run) => run.argv.slice(0, 3))).toEqual([
+			["acp", "--profile", "work"],
+			["acp", "--profile", "work"],
+		]);
+
+		const listing = await client.tool("mcode_profiles", {});
+		expect(listing.text).toContain("no tool of its own");
 	});
 });
 
@@ -828,6 +894,13 @@ describe("through the server", () => {
 		// account the server now defaults to.
 		expect(res.isError).toBe(true);
 		expect(res.text).toContain("Invalid profile name");
+		expect(runs()).toEqual([]);
+
+		// Through a pinned tool as well: a thrown error would escape as a protocol
+		// failure instead of a tool result.
+		const pinned = await reopened.tool("mcode_work_reply", { session, prompt: "x" });
+		expect(pinned.isError).toBe(true);
+		expect(pinned.text).toContain("Invalid profile name");
 		expect(runs()).toEqual([]);
 	});
 

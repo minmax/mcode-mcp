@@ -584,7 +584,7 @@ export function readMcodeHistory(input: Record<string, unknown>, target: ToolTar
 
 	// The session's own profile, not the server's current one: a session started
 	// under `work` keeps its transcript in that account's store after the server
-	// default moves on. An explicit `profile` overrides the record, which is what
+	// default moves on. A tool pinned to a profile overrides the record, which is what
 	// recovers a transcript written before this server knew about profiles.
 	let profile: string | null;
 	try {

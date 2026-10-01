@@ -44,7 +44,6 @@ import {
 	listProfiles,
 	profileDirExists,
 	profileForCall,
-	resolveToolTarget,
 	selectableProfiles,
 	serverProfile,
 	type ToolTarget,
@@ -365,6 +364,37 @@ const PROFILES_TOOL: ToolDefinition = {
  */
 const PROFILED_ACTIONS = new Set(["mcode", "mcode_reply", "mcode_models", "mcode_context", "mcode_history"]);
 
+/** What every MCP client accepts as a tool name; a profile name is wider than that. */
+const PORTABLE_TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * Every per-profile tool this server answers to, by name.
+ *
+ * One table serves both `tools/list` and dispatch, so what is advertised and what
+ * resolves cannot drift apart, and nothing is ever parsed back out of a name: a
+ * name either is a key here or it is not a tool. Parsing `work_reply` was
+ * ambiguous the moment profiles `work` and `work_reply` both existed.
+ *
+ * A profile whose tools would collide with a base tool or another profile's — a
+ * profile called `reply`, or `work_reply` next to `work` — or whose name is not a
+ * portable tool name (a dot, or past 64 characters) gets none, and stays reachable
+ * as the server default. Two tools sharing a name would run one of them on the
+ * wrong account, which is worse than an account without a tool.
+ */
+function profileTools(profiles: string[]): Map<string, ToolTarget> {
+	const table = new Map<string, ToolTarget>();
+	const taken = new Set([...TOOL_DEFINITIONS.map((tool) => tool.name), PROFILES_TOOL.name]);
+	for (const profile of profiles) {
+		const named = [...PROFILED_ACTIONS].map((action) => ({ action, name: toolName(action, profile) }));
+		if (named.some(({ name }) => taken.has(name) || !PORTABLE_TOOL_NAME.test(name))) continue;
+		for (const { action, name } of named) {
+			table.set(name, { action, profile });
+			taken.add(name);
+		}
+	}
+	return table;
+}
+
 /**
  * The tools this server advertises.
  *
@@ -384,20 +414,19 @@ export function toolDefinitions(): ToolDefinition[] {
 
 	const byName = new Map(TOOL_DEFINITIONS.map((tool) => [tool.name, tool]));
 	const variants: ToolDefinition[] = [];
-	for (const profile of profiles) {
-		for (const action of PROFILED_ACTIONS) {
-			const base = byName.get(action);
-			// Every name in PROFILED_ACTIONS is a real tool, but a lookup that can
-			// miss must not silently produce a tool with no schema.
-			if (base === undefined) continue;
-			variants.push({
-				...base,
-				name: toolName(action, profile),
-				description:
-					`On the "${profile}" MiniMax account — its own credentials, sessions and settings, in ` +
-					`~/.minimax-${profile}.\n\n${base.description}`,
-			});
-		}
+	for (const [name, target] of profileTools(profiles)) {
+		const base = byName.get(target.action);
+		// Every name in PROFILED_ACTIONS is a real tool, but a lookup that can
+		// miss must not silently produce a tool with no schema.
+		if (base === undefined || target.profile === null) continue;
+		const dir = target.profile === DEFAULT_PROFILE_NAME ? "~/.minimax" : `~/.minimax-${target.profile}`;
+		variants.push({
+			...base,
+			name,
+			description:
+				`On the "${target.profile}" MiniMax account — its own credentials, sessions and settings, in ` +
+				`${dir}.\n\n${base.description}`,
+		});
 	}
 	return [...TOOL_DEFINITIONS, ...variants, PROFILES_TOOL];
 }
@@ -411,8 +440,29 @@ export function toolDefinitions(): ToolDefinition[] {
  * unknown-tool error as before profiles existed.
  */
 export function resolveCall(name: string): ToolTarget | null {
-	const actions = [...TOOL_DEFINITIONS.map((tool) => tool.name), PROFILES_TOOL.name];
-	return resolveToolTarget(name, actions, selectableProfiles());
+	if (name === PROFILES_TOOL.name || TOOL_DEFINITIONS.some((tool) => tool.name === name)) {
+		return { action: name, profile: null };
+	}
+	return profileTools(selectableProfiles()).get(name) ?? null;
+}
+
+/**
+ * Refuse a `profile` argument, now that the account lives in the tool's name.
+ *
+ * Ignoring it would run a caller who still knows the old schema on the server's
+ * default account without a word — the wrong-account failure profiles exist to
+ * prevent. Only when a profile is in play: otherwise the 0.2.0 surface is exactly
+ * that, including ignoring arguments it never declared.
+ */
+export function profileArgumentError(target: ToolTarget, input: Record<string, unknown>): ToolResult | null {
+	if (!("profile" in input) || !PROFILED_ACTIONS.has(target.action)) return null;
+	if (selectableProfiles().length === 0) return null;
+	return toolResult(
+		`${target.action}: there is no \`profile\` argument — the account is part of the tool's name. ` +
+			"Call mcode_<profile> or mcode_<profile>_<action> for the account you mean (mcode_profiles lists them), " +
+			"or drop the argument to use the tool you called.",
+		true,
+	);
 }
 
 export function toolResult(text: string, isError = false): ToolResult {
@@ -748,6 +798,7 @@ export async function callMcodeReply(
 	let timeoutMs: number | undefined;
 	let transport: Transport;
 	let profile: string | null;
+	let recorded: string | null | undefined;
 	try {
 		prompt = readPrompt(input.prompt, "mcode_reply");
 		cwd = resolveCwd(input.cwd ?? known?.cwd);
@@ -764,6 +815,9 @@ export async function callMcodeReply(
 			transport.name,
 		);
 		profile = readExistingProfile(target, "mcode_reply", known);
+		// Inside the try: a record with an unusable stored name must come back as a
+		// tool error, whichever tool the call came through.
+		recorded = known === undefined ? undefined : profileForCall(undefined, known.profile);
 	} catch (err) {
 		return toolResult(`mcode_reply: ${(err as Error).message}`, true);
 	}
@@ -773,13 +827,12 @@ export async function callMcodeReply(
 	// different conversation in a different account under the same session key.
 	// Reading a session from another account is what `mcode_history` and
 	// `mcode_context` are for; a reply may not move one.
-	const recorded = known === undefined ? undefined : profileForCall(undefined, known.profile);
 	if (recorded !== undefined && profile !== recorded) {
 		return toolResult(
 			`mcode_reply: session ${session} belongs to profile "${recorded ?? DEFAULT_PROFILE_NAME}", and this ` +
 				`call asked for "${profile ?? DEFAULT_PROFILE_NAME}". A session id only names a conversation inside ` +
-				"one account, so it cannot be resumed in another. Omit `profile` to resume where it started, or " +
-				"use mcode_history / mcode_context to read it from the other account.",
+				"one account, so it cannot be resumed in another. Call the reply tool of the account it started " +
+				"in (plain mcode_reply finds it), or use mcode_history / mcode_context to read it from the other account.",
 			true,
 		);
 	}
@@ -1113,6 +1166,7 @@ export function callMcodeProfiles(): ToolResult {
 	const profiles = listProfiles();
 	// Cannot throw: the composition root refuses to serve on a malformed variable.
 	const activeName = serverProfile() ?? DEFAULT_PROFILE_NAME;
+	const tools = profileTools(selectableProfiles());
 	const rows = profiles.map((profile) => {
 		// Compared exactly, not case-folded: on a case-sensitive filesystem `Work`
 		// and `work` are two accounts, and folding here would mark both as the
@@ -1121,12 +1175,16 @@ export function callMcodeProfiles(): ToolResult {
 		const label = profile.name === DEFAULT_PROFILE_NAME ? `${profile.name} (default)` : profile.name;
 		// The tool names, because that is how a caller reaches the account. There is
 		// no `profile` argument to pass, so a row showing only a directory would leave
-		// the reader with nothing to call.
-		const tools =
-			profile.name === DEFAULT_PROFILE_NAME
-				? "mcode"
-				: `mcode_${profile.name}, mcode_${profile.name}_reply, mcode_${profile.name}_models, mcode_${profile.name}_context, mcode_${profile.name}_history`;
-		return `${marker} ${label}\t${describeProfileState(profile)}\n    ${tools}\n    ${profile.dataDir}`;
+		// the reader with nothing to call. Read from the table that dispatch uses, so
+		// a row never names a tool that does not exist.
+		const named = [...tools].filter(([, target]) => target.profile === profile.name).map(([name]) => name);
+		const reach =
+			named.length > 0
+				? named.join(", ")
+				: profile.name === DEFAULT_PROFILE_NAME && activeName === DEFAULT_PROFILE_NAME
+					? "mcode"
+					: "no tool of its own (its name clashes with another tool or is not a valid tool name)";
+		return `${marker} ${label}\t${describeProfileState(profile)}\n    ${reach}\n    ${profile.dataDir}`;
 	});
 	const header = `${profiles.length} profile(s); * is this server's default`;
 	// A redirected data directory silently overrides every profile's own path, so

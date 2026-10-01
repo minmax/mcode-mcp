@@ -2,6 +2,14 @@
 
 What changed in behaviour, in the order it shipped. Dates are publish dates from the registry.
 
+## 0.4.0 — 2026-10-01
+
+- **The profile is a prefix in the tool name, not an argument.** For a profile `work`: `mcode_work`, `mcode_work_reply`, `mcode_work_models`, `mcode_work_context`, `mcode_work_history`. The `profile` argument is gone from every schema, so several accounts are live in one agent at once and the choice is settled by the tool name before any argument is read. An account that does not exist is an unknown tool. The untargeted `mcode*` tools follow `MCODE_MCP_PROFILE`, then `MINIMAX_PROFILE`; with no profile in play the tool list is still 0.2.0's, byte for byte. **Breaking** for callers of 0.3.x: `profile: "work"` no longer selects anything.
+- **A leftover `profile` argument is refused, not ignored** (when a profile is in play), so a caller still on the old schema is not silently billed to the default account.
+- **Tool names come from one table.** A profile whose tools would collide with a base tool or another profile's (`reply`; `work_reply` next to `work`) or are not portable tool names (a dot, over 64 characters) gets no tools, instead of two tools sharing a name and one running on the wrong account. `mcode_profiles` says so, and lists the tools that reach each account.
+- **The default account has tools when the server default moves off it:** `mcode_default`, `mcode_default_reply`, … — plain `mcode` no longer reaches it.
+- **Only the winning default variable is read when advertising**, so a malformed `MINIMAX_PROFILE` behind a valid `MCODE_MCP_PROFILE` no longer breaks `tools/list`. A corrupt stored profile on a session now returns a tool error through a profile-pinned `mcode_<name>_reply` as well.
+
 ## 0.3.1 — 2026-10-01
 
 - **Profiles are advertised only when they can do something.** `mcode_profiles` and the `profile` argument appear only when the server has been pointed at a profile or one exists on disk. On a machine with neither — everyone on a MiniMax Code that has never heard of a profile — the tool list and every argument schema are byte-for-byte what they were in 0.2.0, verified by diffing `tools/list` against that release: no new tool, no new argument, and no argument that can only fail. Recomputed per `tools/list`, so signing a profile in while the server is already running makes it appear without a restart.

@@ -89,15 +89,21 @@ Server default: `MCODE_MCP_PROFILE`, then `MINIMAX_PROFILE`. A malformed value s
 
 ### Advertising
 
-`mcode_profiles` and the `profile` argument are advertised only when a profile can
+`mcode_profiles` and the per-profile tools are advertised only when a profile can
 change what a call does: the server is pointed at one, or one exists on disk.
 Otherwise the tool list and every schema are byte-for-byte what they were before
 this feature, which is the point — a caller on a MiniMax Code without profile
-support meets nothing new and no argument that can only fail. Recomputed per
-`tools/list`, so signing a profile in while the server runs makes it appear.
+support meets nothing new. Recomputed per `tools/list`, so signing a profile in
+while the server runs makes it appear.
 
-Advertising is not permission. A `profile` argument that arrives regardless of the
-schema is resolved and obeyed.
+The per-profile tools and dispatch share one name→(action, profile) table; a name is
+looked up, never parsed. A profile whose tools would collide with a base tool or
+another profile's (`reply`; `work_reply` beside `work`) or are not portable tool names
+(a dot, over 64 characters) gets none. When the server default is a named profile the
+implicit account is `mcode_default*`, since plain `mcode` no longer reaches it.
+
+There is no `profile` argument. When a profile is in play one that arrives anyway is
+refused, not ignored: ignoring it would run the call on the default account unannounced.
 
 ### The one place this adapter does not just pass mcode through
 

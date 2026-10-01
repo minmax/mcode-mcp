@@ -126,15 +126,28 @@ own paths with the same arithmetic, so a run and the transcript read back
 afterwards can never disagree about which account they belong to.
 
 ```js
-mcode_profiles()                       // what exists, and what is signed in
-mcode({ prompt: "…", profile: "work" }) // a task on the `work` account
+mcode_profiles()                    // what exists, what is signed in, and the tools that reach each
+mcode_work({ prompt: "…" })         // a task on the `work` account
 ```
 
 Names must be 1–64 letters, numbers, dots, underscores or hyphens, starting and
 ending with a letter or number — a name becomes a directory segment under your
-home, so `../../etc` is refused rather than sanitised. Because the name is spliced
-into a tool name, a profile containing `_` is read back by the longest match first,
-so `work_2` and `work` can both exist.
+home, so `../../etc` is refused rather than sanitised.
+
+A profile only gets tools if its tool names are usable: they must be unique and
+made of letters, numbers, `_` and `-` (so no dots, and a name short enough for 64
+characters). A profile called `reply` would collide with `mcode_reply`, and `work_reply`
+next to `work` would both claim `mcode_work_reply`; such a profile gets no tools
+rather than a tool that could run on the wrong account. It is still listed by
+`mcode_profiles` and can still be the server's default.
+
+A `profile` argument is refused (when a profile is in play) rather than ignored:
+the account is the tool you called, and a caller that still passes the old argument
+would otherwise be billed to the default account without a word.
+
+**The default account has a tool when the server default is elsewhere.** With
+`MCODE_MCP_PROFILE=work`, plain `mcode` runs on `work`, so the implicit account is
+reached as `mcode_default`, `mcode_default_reply`, and so on.
 
 **The server's default** is `MCODE_MCP_PROFILE`, falling back to mcode's own
 `MINIMAX_PROFILE` if that is set and ours is not. A malformed value makes the
