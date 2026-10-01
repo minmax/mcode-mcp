@@ -75,7 +75,7 @@ Unsupported (honest error): `follow_up`, `effort`, `allowed_tools`, `system_prom
 
 ## 6. Auth profiles
 
-A profile is mcode's own isolation unit: `~/.minimax` for the implicit default and `~/.minimax-<name>` for a named one, each with its own credentials, sessions and settings. The wire is mcode's `--profile <name>` on every command; `MINIMAX_PROFILE` is its public selector. **Requires a MiniMax Code that has them (0.6.0-era) — the rest of this document is verified against 0.3.11/0.5.9.** Naming a profile on a build without it fails with mcode's own unknown-option error, and the default path is untouched.
+A profile is mcode's own isolation unit: `~/.minimax` for the implicit default and `~/.minimax-<name>` for a named one, each with its own credentials, sessions and settings. The wire is mcode's `--profile <name>` on every command; `MINIMAX_PROFILE` is its public selector. On our side of the wire the account is a segment of the **tool name** — `mcode_work`, `mcode_work_reply` — and never an argument, so several accounts are live in one agent at once and the choice cannot be changed by what a caller sends. A name that does not resolve to a real profile is an unknown tool. **Requires a MiniMax Code that has them (0.6.0-era) — the rest of this document is verified against 0.3.11/0.5.9.** Naming a profile on a build without it fails with mcode's own unknown-option error, and the default path is untouched.
 
 Three rules this adapter adds, because it *reads* the data directory and not only writes to it:
 

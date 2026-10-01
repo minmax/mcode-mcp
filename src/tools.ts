@@ -36,6 +36,7 @@ import { withSlot } from "./mcode-process.ts";
 import { ConfigEditError } from "./minimax-config.ts";
 import { acpModelOptions, acpSelects, decodeAcpModelValue, formatModelRef } from "./model-ref.ts";
 import {
+	callProfile,
 	DEFAULT_PROFILE_NAME,
 	dataDirForProfile,
 	dataDirIsOverridden,
@@ -43,8 +44,11 @@ import {
 	listProfiles,
 	profileDirExists,
 	profileForCall,
-	profilesAvailable,
+	resolveToolTarget,
+	selectableProfiles,
 	serverProfile,
+	type ToolTarget,
+	toolName,
 } from "./profile.ts";
 import { getSession, listSessions, rememberSession, withSessionLock } from "./sessions.ts";
 import { findTranscript, statKey } from "./transcript.ts";
@@ -79,18 +83,6 @@ const LOCAL_LISTING = {
 	idempotentHint: true,
 	openWorldHint: false,
 } as const;
-
-/** Not shared: the `profile` description lives with the code that decides to advertise it. */
-const PROFILE_PROP = {
-	type: "string",
-	description:
-		"Named auth profile: its own MiniMax account, sessions and settings, in ~/.minimax-<name>. " +
-		"Omit to use this server's default (MCODE_MCP_PROFILE, else the default profile). 'default' " +
-		"means the default profile explicitly. A session keeps the profile it started under, so " +
-		"`mcode_reply` does not need it, and it may not be changed — a session id only names a " +
-		"conversation inside one account. Use mcode_profiles to list what exists and what is signed in; " +
-		"add one with `mcode login --profile <name>` in a terminal.",
-};
 
 const SHARED_PROPS = {
 	model: {
@@ -352,46 +344,75 @@ const PROFILES_TOOL: ToolDefinition = {
 	description:
 		"List the MiniMax auth profiles on this machine, and which one this server uses by default. " +
 		"A profile is an isolated data directory (~/.minimax-<name>) with its own account, sessions and " +
-		"settings, so several token plans can be kept side by side. Read the credential state before " +
-		"choosing one: a profile reported as 'signed out' or 'not created' has nothing to authenticate " +
-		"with, and running against it is how a task ends up charged to the wrong account. Starts no " +
-		"process and starts no task. Add one with `mcode login --profile <name>` in a terminal — login is " +
-		"interactive and has no headless equivalent.",
+		"settings, so several token plans can be kept side by side. Each row names the tools that reach " +
+		"it, which is how you address a different account: there is no `profile` argument to pass. Read " +
+		"the credential state first — a profile reported as 'signed out' or 'not created' has nothing to " +
+		"authenticate with, and running against it is how a task ends up charged to the wrong account. " +
+		"Starts no process and starts no task. Add one with `mcode login --profile <name>` in a terminal — " +
+		"login is interactive and has no headless equivalent.",
 	inputSchema: { type: "object", properties: {}, additionalProperties: false },
 	annotations: LOCAL_LISTING,
 };
 
-const PROFILE_TOOL_NAMES = new Set(["mcode", "mcode_reply", "mcode_models", "mcode_context", "mcode_history"]);
+/**
+ * The tools that get a per-profile variant.
+ *
+ * The ones that can start a run or read an account's own state. `mcode_send`,
+ * `mcode_running` and `mcode_sessions` are deliberately not among them: they act on
+ * turns and records this process already holds, which are not tied to an account
+ * once started, and a per-profile copy of each would be a tool that cannot do
+ * anything a caller could not already do.
+ */
+const PROFILED_ACTIONS = new Set(["mcode", "mcode_reply", "mcode_models", "mcode_context", "mcode_history"]);
 
 /**
  * The tools this server advertises.
  *
  * With no profile in play this is byte-for-byte the list from before profiles
- * existed: no `mcode_profiles`, and no `profile` property on any schema. A user
- * whose MiniMax Code has no notion of a profile then sees nothing new to be
- * puzzled by and no argument that can only fail.
+ * existed. With one, the account arrives as a per-profile tool — `mcode_work`,
+ * `mcode_work_reply` — so several can be live at once and the model picks by calling
+ * a different tool. There is no `profile` argument: a tool name says which account
+ * it acts on, which is also the only way the choice can survive being retried,
+ * forwarded or read back out of a transcript.
  *
  * Recomputed per `tools/list` rather than once at import, so signing a profile in
  * while the server is already running makes it appear without a restart.
- *
- * This is only about what is advertised. A `profile` argument that arrives anyway
- * is still resolved and obeyed: the caller's knowledge of the feature outranks this
- * machine's.
  */
 export function toolDefinitions(): ToolDefinition[] {
-	if (!profilesAvailable()) return TOOL_DEFINITIONS;
-	return TOOL_DEFINITIONS.map((tool) => {
-		if (!PROFILE_TOOL_NAMES.has(tool.name)) return tool;
-		const schema = tool.inputSchema as {
-			type: "object";
-			properties?: Record<string, unknown>;
-			required?: string[];
-		};
-		return {
-			...tool,
-			inputSchema: { ...schema, properties: { ...schema.properties, profile: PROFILE_PROP } },
-		};
-	}).concat(PROFILES_TOOL);
+	const profiles = selectableProfiles();
+	if (profiles.length === 0) return TOOL_DEFINITIONS;
+
+	const byName = new Map(TOOL_DEFINITIONS.map((tool) => [tool.name, tool]));
+	const variants: ToolDefinition[] = [];
+	for (const profile of profiles) {
+		for (const action of PROFILED_ACTIONS) {
+			const base = byName.get(action);
+			// Every name in PROFILED_ACTIONS is a real tool, but a lookup that can
+			// miss must not silently produce a tool with no schema.
+			if (base === undefined) continue;
+			variants.push({
+				...base,
+				name: toolName(action, profile),
+				description:
+					`On the "${profile}" MiniMax account — its own credentials, sessions and settings, in ` +
+					`~/.minimax-${profile}.\n\n${base.description}`,
+			});
+		}
+	}
+	return [...TOOL_DEFINITIONS, ...variants, PROFILES_TOOL];
+}
+
+/**
+ * Split a called tool name into the action and the account it pins.
+ *
+ * Every tool name resolves, not only the profiled ones — `mcode_sessions` and
+ * `mcode_profiles` have no per-profile form and must still be callable. `null`
+ * means the name is not one of ours, which the caller turns into the same
+ * unknown-tool error as before profiles existed.
+ */
+export function resolveCall(name: string): ToolTarget | null {
+	const actions = [...TOOL_DEFINITIONS.map((tool) => tool.name), PROFILES_TOOL.name];
+	return resolveToolTarget(name, actions, selectableProfiles());
 }
 
 export function toolResult(text: string, isError = false): ToolResult {
@@ -516,17 +537,10 @@ function readPrompt(value: unknown, tool: string): string {
 	return value;
 }
 
-/**
- * The profile one call runs under, or null for the default.
- *
- * The chain from argument to recorded session to server default is where a
- * wrong-account read hides, so it lives in one place — `profileForCall` — and this
- * only turns its rejection into a readable tool error instead of a run that quietly
- * lands in another account. `mcode_history` resolves the same way.
- */
-function readProfile(input: unknown, tool: string, known?: { profile?: string } | undefined): string | null {
+/** As above, but as a readable tool error rather than a throw. */
+function readCallProfile(target: ToolTarget, tool: string, known?: { profile?: string } | undefined): string | null {
 	try {
-		return profileForCall(input, known?.profile);
+		return callProfile(target, known?.profile);
 	} catch (err) {
 		throw new Error(`${tool}: ${(err as Error).message}`);
 	}
@@ -541,8 +555,12 @@ function readProfile(input: unknown, tool: string, known?: { profile?: string } 
  * but is not signed in is left alone: it may hold an API key, and mcode is the
  * authority on whether it can authenticate.
  */
-function readExistingProfile(input: unknown, tool: string, known?: { profile?: string } | undefined): string | null {
-	const profile = readProfile(input, tool, known);
+function readExistingProfile(
+	target: ToolTarget,
+	tool: string,
+	known?: { profile?: string } | undefined,
+): string | null {
+	const profile = readCallProfile(target, tool, known);
 	if (profile !== null && !profileDirExists(profile)) {
 		throw new Error(
 			`${tool}: no profile named "${profile}" — there is no data directory at ${dataDirForProfile(profile)} ` +
@@ -652,7 +670,11 @@ function renderSuccess(outcome: Outcome, prefix: string | null): ToolResult {
 	return toolResult(parts.join("\n\n"), Boolean(problem));
 }
 
-export async function callMcode(input: Record<string, unknown>, ctx: CallContext): Promise<ToolResult> {
+export async function callMcode(
+	input: Record<string, unknown>,
+	ctx: CallContext,
+	target: ToolTarget,
+): Promise<ToolResult> {
 	let prompt: string;
 	let cwd: string;
 	let overrides: RunOverrides;
@@ -665,7 +687,7 @@ export async function callMcode(input: Record<string, unknown>, ctx: CallContext
 		timeoutMs = readTimeout(input.timeout_ms);
 		transport = resolveTransport(input.transport);
 		overrides = readOverrides(input, transport.name);
-		profile = readExistingProfile(input.profile, "mcode");
+		profile = readExistingProfile(target, "mcode");
 	} catch (err) {
 		return toolResult(`mcode: ${(err as Error).message}`, true);
 	}
@@ -709,7 +731,11 @@ export async function callMcode(input: Record<string, unknown>, ctx: CallContext
 	);
 }
 
-export async function callMcodeReply(input: Record<string, unknown>, ctx: CallContext): Promise<ToolResult> {
+export async function callMcodeReply(
+	input: Record<string, unknown>,
+	ctx: CallContext,
+	target: ToolTarget,
+): Promise<ToolResult> {
 	const session = input.session;
 	if (typeof session !== "string" || session.trim() === "") {
 		return toolResult("mcode_reply: `session` is required.", true);
@@ -737,7 +763,7 @@ export async function callMcodeReply(input: Record<string, unknown>, ctx: CallCo
 			},
 			transport.name,
 		);
-		profile = readExistingProfile(input.profile, "mcode_reply", known);
+		profile = readExistingProfile(target, "mcode_reply", known);
 	} catch (err) {
 		return toolResult(`mcode_reply: ${(err as Error).message}`, true);
 	}
@@ -811,14 +837,18 @@ export async function callMcodeReply(input: Record<string, unknown>, ctx: CallCo
 	return renderSuccess(outcome, identityPrefix(session, profile));
 }
 
-export async function callMcodeModels(input: Record<string, unknown>, ctx: CallContext): Promise<ToolResult> {
+export async function callMcodeModels(
+	input: Record<string, unknown>,
+	ctx: CallContext,
+	target: ToolTarget,
+): Promise<ToolResult> {
 	const search = input.search;
 	if (search !== undefined && typeof search !== "string") {
 		return toolResult("mcode_models: `search` must be a string.", true);
 	}
 	let profile: string | null;
 	try {
-		profile = readExistingProfile(input.profile, "mcode_models");
+		profile = readExistingProfile(target, "mcode_models");
 	} catch (err) {
 		return toolResult((err as Error).message, true);
 	}
@@ -888,7 +918,11 @@ export async function callMcodeModels(input: Record<string, unknown>, ctx: CallC
 	return toolResult(`${header}\n\n${lines.join("\n")}${footer}`);
 }
 
-export async function callMcodeContext(input: Record<string, unknown>, ctx: CallContext): Promise<ToolResult> {
+export async function callMcodeContext(
+	input: Record<string, unknown>,
+	ctx: CallContext,
+	target: ToolTarget,
+): Promise<ToolResult> {
 	const session = input.session;
 	if (typeof session !== "string" || session.trim() === "") {
 		return toolResult("mcode_context: `session` is required.", true);
@@ -898,7 +932,7 @@ export async function callMcodeContext(input: Record<string, unknown>, ctx: Call
 	// profile either fails or reports another account's budget.
 	let profile: string | null;
 	try {
-		profile = readExistingProfile(input.profile, "mcode_context", getSession(session));
+		profile = readExistingProfile(target, "mcode_context", getSession(session));
 	} catch (err) {
 		return toolResult((err as Error).message, true);
 	}
@@ -1012,8 +1046,8 @@ export function callMcodeRunning(): ToolResult {
 	return toolResult(`${rows.length} running:\n\n${rows.join("\n")}`);
 }
 
-export function callMcodeHistory(input: Record<string, unknown>): ToolResult {
-	const page = readMcodeHistory(input);
+export function callMcodeHistory(input: Record<string, unknown>, target: ToolTarget): ToolResult {
+	const page = readMcodeHistory(input, target);
 	if ("error" in page) return toolResult(page.error, true);
 	return toolResult(JSON.stringify(page));
 }
@@ -1085,7 +1119,14 @@ export function callMcodeProfiles(): ToolResult {
 		// server's default and say which one to use.
 		const marker = profile.name === activeName ? "*" : " ";
 		const label = profile.name === DEFAULT_PROFILE_NAME ? `${profile.name} (default)` : profile.name;
-		return `${marker} ${label}\t${describeProfileState(profile)}\t${profile.dataDir}`;
+		// The tool names, because that is how a caller reaches the account. There is
+		// no `profile` argument to pass, so a row showing only a directory would leave
+		// the reader with nothing to call.
+		const tools =
+			profile.name === DEFAULT_PROFILE_NAME
+				? "mcode"
+				: `mcode_${profile.name}, mcode_${profile.name}_reply, mcode_${profile.name}_models, mcode_${profile.name}_context, mcode_${profile.name}_history`;
+		return `${marker} ${label}\t${describeProfileState(profile)}\n    ${tools}\n    ${profile.dataDir}`;
 	});
 	const header = `${profiles.length} profile(s); * is this server's default`;
 	// A redirected data directory silently overrides every profile's own path, so

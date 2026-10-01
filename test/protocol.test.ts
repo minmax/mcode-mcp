@@ -58,7 +58,7 @@ describe("handshake", () => {
 		client.close();
 	});
 
-	it("exposes the profile tools once a profile exists", async () => {
+	it("exposes one tool set per profile, named after it", async () => {
 		// MINIMAX_DATA_DIR is cleared because it outranks the profile: with it set,
 		// every profile resolves to that one directory and they stop being separate
 		// accounts, which is exactly what this feature must not pretend otherwise.
@@ -68,11 +68,21 @@ describe("handshake", () => {
 			const client = new Client(withProfile.env, withProfile.dir);
 			await client.handshake();
 			const tools = await client.toolList();
-			expect(tools.map((t) => t.name).sort()).toEqual([...WITHOUT_PROFILES, "mcode_profiles"].sort());
-			const profiled = new Set(["mcode", "mcode_reply", "mcode_models", "mcode_context", "mcode_history"]);
+			expect(tools.map((t) => t.name).sort()).toEqual(
+				[
+					...WITHOUT_PROFILES,
+					"mcode_profiles",
+					"mcode_work",
+					"mcode_work_reply",
+					"mcode_work_models",
+					"mcode_work_context",
+					"mcode_work_history",
+				].sort(),
+			);
+			// The account is in the name, so no schema carries a `profile` argument any
+			// more — including the per-profile copies, which share their base schema.
 			for (const tool of tools) {
-				const has = Object.keys(tool.inputSchema.properties ?? {}).includes("profile");
-				expect(has, tool.name).toBe(profiled.has(tool.name));
+				expect(Object.keys(tool.inputSchema.properties ?? {}), tool.name).not.toContain("profile");
 			}
 			client.close();
 		} finally {

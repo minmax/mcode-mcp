@@ -420,37 +420,79 @@ describe("what is advertised", () => {
 		}
 	});
 
-	it("advertises profiles once one exists on disk", async () => {
+	it("advertises one tool set per profile, named after it", async () => {
+		// Two accounts are two tools, so a model can have both live at once.
 		seedCredentials(join(home, ".minimax-work"));
-		expect(await names()).toEqual([...WITHOUT_PROFILES, "mcode_profiles"].sort());
-		const properties = await propertiesOf();
-		for (const tool of ["mcode", "mcode_reply", "mcode_models", "mcode_context", "mcode_history"]) {
-			expect(properties[tool], tool).toContain("profile");
+		seedCredentials(join(home, ".minimax-personal"));
+		const listed = await names();
+		expect(listed).toContain("mcode_profiles");
+		for (const profile of ["work", "personal"]) {
+			expect(listed, profile).toContain(`mcode_${profile}`);
+			for (const action of ["reply", "models", "context", "history"]) {
+				expect(listed, `${profile}.${action}`).toContain(`mcode_${profile}_${action}`);
+			}
 		}
 	});
 
-	it("advertises profiles when the server is pointed at one that does not exist yet", async () => {
-		// Otherwise the tool that explains how to add a profile would be hidden from
-		// exactly the user who needs to read it.
-		expect(await names({ MCODE_MCP_PROFILE: "work" })).toContain("mcode_profiles");
-		expect(await names({ MCODE_MCP_PROFILE: "", MINIMAX_PROFILE: "work" })).toContain("mcode_profiles");
+	it("no longer advertises a profile argument on any tool", async () => {
+		seedCredentials(join(home, ".minimax-work"));
+		for (const [tool, properties] of Object.entries(await propertiesOf())) {
+			expect(properties, tool).not.toContain("profile");
+		}
 	});
 
-	it("still obeys a profile that arrives when nothing advertised it", async () => {
-		// A client that knows about the feature must not be second-guessed by what
-		// this machine happens to have. The schema is hidden, the behaviour is not.
+	it("picks the longest matching profile, so a name ending in a digit still works", async () => {
+		// A profile called `work_2` must not be read as profile `work` calling a
+		// `2_reply` that does not exist.
+		seedCredentials(join(home, ".minimax-work"));
+		seedCredentials(join(home, ".minimax-work_2"));
+		const listed = await names();
+		expect(listed).toContain("mcode_work_2");
+		expect(listed).toContain("mcode_work_2_reply");
+		expect(listed).toContain("mcode_work_reply");
+	});
+
+	it("advertises a profile the server is pointed at but has not created yet", async () => {
+		// Otherwise setting the variable would leave a server whose default account has
+		// no tool at all, and the tool explaining how to fix that is one call away —
+		// behind a tool that cannot work.
+		expect(await names({ MCODE_MCP_PROFILE: "work" })).toContain("mcode_work");
+		expect(await names({ MCODE_MCP_PROFILE: "", MINIMAX_PROFILE: "work" })).toContain("mcode_work");
+	});
+
+	it("runs several profiles at once from one server", async () => {
+		seedCredentials(join(home, ".minimax-work"));
+		seedCredentials(join(home, ".minimax-personal"));
+		const argvLog = join(home, "argv.log");
+		client = new Client({ ...ws.env, FAKE_ARGV_LOG: argvLog }, ws.dir);
+		await client.handshake();
+
+		const onWork = await client.tool("mcode_work", { prompt: "a" });
+		const onPersonal = await client.tool("mcode_personal", { prompt: "b" });
+		const onDefault = await client.tool("mcode", { prompt: "c" });
+		expect([onWork, onPersonal, onDefault].map((r) => r.isError)).toEqual([false, false, false]);
+		expect(onWork.text).toContain("[profile: work]");
+		expect(onPersonal.text).toContain("[profile: personal]");
+		expect(onDefault.text).not.toContain("[profile:");
+
+		expect(readFakeRuns(argvLog).map((run) => run.argv.slice(0, 3))).toEqual([
+			["acp", "--profile", "work"],
+			["acp", "--profile", "personal"],
+			["acp"],
+		]);
+	});
+
+	it("cannot be redirected by a `profile` argument any more", async () => {
 		seedCredentials(join(home, ".minimax-work"));
 		const argvLog = join(home, "argv.log");
 		client = new Client({ ...ws.env, FAKE_ARGV_LOG: argvLog }, ws.dir);
 		await client.handshake();
-		const res = await client.tool("mcode", { prompt: "do it", profile: "work" });
+		// The name is settled before any argument is read, so a stray argument cannot
+		// move a call onto another account.
+		const res = await client.tool("mcode_work", { prompt: "do it", profile: "personal" });
 		expect(res.isError).toBe(false);
 		expect(res.text).toContain("[profile: work]");
-		expect(
-			readFakeRuns(argvLog)
-				.find((r) => r.argv[0] === "acp")
-				?.argv.slice(0, 3),
-		).toEqual(["acp", "--profile", "work"]);
+		expect(readFakeRuns(argvLog)[0]?.argv.slice(0, 3)).toEqual(["acp", "--profile", "work"]);
 	});
 });
 
@@ -485,7 +527,7 @@ describe("through the server", () => {
 
 	it("passes the profile to mcode and says which account answered", async () => {
 		const c = await open();
-		const res = await c.tool("mcode", { prompt: "do it", profile: "work" });
+		const res = await c.tool("mcode_work", { prompt: "do it" });
 		expect(res.isError).toBe(false);
 		expect(sessionIdOf(res.text)).toBeTruthy();
 		expect(res.text).toContain("[profile: work]");
@@ -507,17 +549,17 @@ describe("through the server", () => {
 		expect(run?.profileEnv).toBeNull();
 	});
 
-	it("uses an explicit 'default' even when the server default is another account", async () => {
+	it("runs on the launch parameter's account, not always the default one", async () => {
+		// The untargeted `mcode` is whatever the launch parameter selected. Naming an
+		// account is the per-profile tool's job now, so the base tool has one meaning:
+		// the server's default.
 		const c = await open({ MCODE_MCP_PROFILE: "work" });
-		const res = await c.tool("mcode", { prompt: "do it", profile: "default" });
+		const res = await c.tool("mcode", { prompt: "do it" });
 		expect(res.isError).toBe(false);
-		expect(res.text).not.toContain("[profile:");
+		expect(res.text).toContain("[profile: work]");
 		const run = runs().find((r) => r.argv[0] === "acp");
-		expect(run?.argv).toEqual(["acp"]);
-		expect(run?.profileEnv).toBeNull();
-		expect(run?.dataDir).toBe(join(home, ".minimax"));
+		expect(run?.argv.slice(0, 3)).toEqual(["acp", "--profile", "work"]);
 	});
-
 	it("follows mcode's own variable when this server's is not set", async () => {
 		const c = await open({ MINIMAX_PROFILE: "work" });
 		const res = await c.tool("mcode", { prompt: "do it" });
@@ -530,25 +572,35 @@ describe("through the server", () => {
 		).toEqual(["acp", "--profile", "work"]);
 	});
 
-	it("refuses a profile name that could redirect the credential store", async () => {
+	it("cannot be called for an account that does not exist, at all", async () => {
+		// A tool name only resolves to a profile that is real, so a mistyped account is
+		// an unknown tool and nothing is spawned. That is stronger than validating an
+		// argument: a name like `mcode_../../etc` has no profile to resolve to, so
+		// there is no path for it to reach a directory at all.
 		const c = await open();
-		const res = await c.tool("mcode", { prompt: "do it", profile: "../../etc" });
-		expect(res.isError).toBe(true);
-		expect(res.text).toContain("Invalid profile name");
+		for (const name of ["mcode_wrok", "mcode_../../etc", "mcode_work_reply_2"]) {
+			// A protocol error, not a tool result: there is no such account, so there is
+			// no tool and nothing ran.
+			const res = await c.call("tools/call", { name, arguments: { prompt: "do it" } });
+			expect(res.error?.code, name).toBe(-32602);
+		}
 		expect(runs()).toEqual([]);
 	});
 
-	it("refuses a profile that does not exist, instead of creating an empty account", async () => {
-		const c = await open();
-		const res = await c.tool("mcode", { prompt: "do it", profile: "wrok" });
+	it("refuses the account the launch parameter names when it does not exist", async () => {
+		// The one reachable case: the variable is honoured for the base tool and gets a
+		// tool, but there is no account behind it yet, and saying so is better than
+		// letting mcode create an empty one.
+		const c = await open({ MCODE_MCP_PROFILE: "notyet" });
+		const res = await c.tool("mcode_notyet", { prompt: "do it" });
 		expect(res.isError).toBe(true);
-		expect(res.text).toContain("no profile named");
+		expect(res.text).toContain('no profile named "notyet"');
 		expect(runs()).toEqual([]);
 	});
 
 	it("carries the session's own profile into mcode_reply, so it resumes in the same account", async () => {
 		const c = await open();
-		const started = await c.tool("mcode", { prompt: "first", profile: "work" });
+		const started = await c.tool("mcode_work", { prompt: "first" });
 		clearRuns();
 
 		const replied = await c.tool("mcode_reply", { session: sessionIdOf(started.text), prompt: "second" });
@@ -584,7 +636,7 @@ describe("through the server", () => {
 		const started = await c.tool("mcode", { prompt: "first" });
 		clearRuns();
 
-		const res = await c.tool("mcode_reply", { session: sessionIdOf(started.text), prompt: "x", profile: "work" });
+		const res = await c.tool("mcode_work_reply", { session: sessionIdOf(started.text), prompt: "x" });
 		expect(res.isError).toBe(true);
 		expect(res.text).toContain("belongs to profile");
 		expect(runs()).toEqual([]);
@@ -592,7 +644,7 @@ describe("through the server", () => {
 
 	it("records the profile so the session list and the transcript find the right store", async () => {
 		const c = await open();
-		const started = await c.tool("mcode", { prompt: "first", profile: "work" });
+		const started = await c.tool("mcode_work", { prompt: "first" });
 		const session = sessionIdOf(started.text);
 
 		const sessions = await c.tool("mcode_sessions", {});
@@ -625,7 +677,7 @@ describe("through the server", () => {
 		// profile has to exist, or the guard answers first, which is a better error
 		// but a different one.
 		seedCredentials(join(home, ".minimax-personal"));
-		const elsewhere = await c.tool("mcode_history", { session, profile: "personal", cursor: page.cursor });
+		const elsewhere = await c.tool("mcode_personal_history", { session, cursor: page.cursor });
 		expect(elsewhere.text).toContain("issued for profile");
 	});
 
@@ -652,7 +704,7 @@ describe("through the server", () => {
 		);
 		const page = JSON.parse((await c.tool("mcode_history", { session })).text);
 
-		const res = await c.tool("mcode_history", { session, profile: "personal", cursor: page.cursor });
+		const res = await c.tool("mcode_personal_history", { session, cursor: page.cursor });
 		expect(res.isError).toBe(true);
 		expect(res.text).toContain("issued for profile");
 	});
@@ -665,11 +717,7 @@ describe("through the server", () => {
 		// A blank string is the same "use your default" that `cwd` already reads as,
 		// not a choice of the default profile. Reading it as a choice would refuse
 		// the reply, and treating it as the server default would move the session.
-		const replied = await c.tool("mcode_reply", {
-			session: sessionIdOf(started.text),
-			prompt: "second",
-			profile: "   ",
-		});
+		const replied = await c.tool("mcode_reply", { session: sessionIdOf(started.text), prompt: "second" });
 		expect(replied.isError).toBe(false);
 		expect(
 			runs()
@@ -734,7 +782,7 @@ describe("through the server", () => {
 
 	it("carries the profile on the print transport and its reads", async () => {
 		const c = await open();
-		const started = await c.tool("mcode", { prompt: "first", profile: "work", transport: "print" });
+		const started = await c.tool("mcode_work", { prompt: "first", transport: "print" });
 		expect(started.isError).toBe(false);
 		const run = runs().find((r) => r.argv[0] === "exec");
 		expect(run?.argv.slice(0, 7)).toEqual([
@@ -751,7 +799,7 @@ describe("through the server", () => {
 
 	it("reads the model catalog against the named profile", async () => {
 		const c = await open();
-		const res = await c.tool("mcode_models", { profile: "work" });
+		const res = await c.tool("mcode_work_models", {});
 		expect(res.isError).toBe(false);
 		expect(
 			runs()
@@ -804,6 +852,14 @@ describe("through the server", () => {
 		expect(sessions.text).toContain("unusable stored profile");
 	});
 
+	it("answers mcode_profiles with the tool names that reach each account", async () => {
+		const c = await open();
+		const res = await c.tool("mcode_profiles", {});
+		expect(res.isError).toBe(false);
+		expect(res.text).toContain("mcode_work, mcode_work_reply");
+		expect(res.text).toContain("mcode_work_context");
+	});
+
 	it("lists the profiles and marks the one it uses", async () => {
 		seedCredentials(join(home, ".minimax-work"));
 		const c = await open({ MCODE_MCP_PROFILE: "work" });
@@ -814,14 +870,17 @@ describe("through the server", () => {
 		expect(res.text).toContain("default (default)");
 	});
 
-	it("refuses a mistyped profile on a read, instead of reporting a missing file", async () => {
+	it("refuses a mistyped account on a read, instead of reporting a missing file", async () => {
 		const c = await open();
 		const started = await c.tool("mcode", { prompt: "first" });
 		// "transcript not written yet" would read as a missing file rather than a
-		// wrong name, and send the caller looking in the wrong place.
-		const res = await c.tool("mcode_history", { session: sessionIdOf(started.text), profile: "wrok" });
-		expect(res.isError).toBe(true);
-		expect(res.text).toContain('no profile named "wrok"');
+		// wrong name, and send the caller looking in the wrong place. An account that
+		// does not exist has no tool at all.
+		const res = await c.call("tools/call", {
+			name: "mcode_wrok_history",
+			arguments: { session: sessionIdOf(started.text) },
+		});
+		expect(res.error?.code).toBe(-32602);
 	});
 
 	it("warns that a redirected data dir collapses every profile onto one store", async () => {

@@ -79,6 +79,9 @@ const DATA_DIR_ENTRIES = [
 	"skills",
 ];
 
+/** Every tool name starts with this, so a profile-prefixed name is still ours. */
+export const TOOL_FAMILY = "mcode";
+
 const DATA_DIR_BASENAME = ".minimax";
 const LEGACY_DATA_DIR_BASENAME = ".mavis";
 const CONFIG_FILE_NAME = "config.yaml";
@@ -520,6 +523,92 @@ export function profilesAvailable(env: NodeJS.ProcessEnv = process.env): boolean
 	if ((env[PROFILE_ENV_VAR]?.trim() ?? "") !== "") return true;
 	if ((env[MCODE_PROFILE_ENV_VAR]?.trim() ?? "") !== "") return true;
 	return listProfiles(env).some((profile) => profile.name !== DEFAULT_PROFILE_NAME);
+}
+
+/**
+ * The account one call runs under, as encoded in the tool's own name.
+ *
+ * A profile is a segment of the tool name rather than an argument, which is what
+ * lets several accounts be live in one agent at the same time: each is a separate
+ * tool, so a model picks the account by choosing what to call. An argument cannot
+ * do that — one tool means one account per call, and every call site has to carry
+ * the choice.
+ */
+export interface ToolTarget {
+	/** The underlying tool: `mcode`, `mcode_reply`, and so on. */
+	action: string;
+	/** The profile the name pins the call to, or null for the untargeted tool. */
+	profile: string | null;
+}
+
+/**
+ * Name the tool that runs `action` on `profile`.
+ *
+ * The family prefix stays, so a profile-prefixed name is still recognisably one of
+ * ours, and the profile sits immediately after it: `mcode_work`, `mcode_work_reply`.
+ * A name a model can read at a glance is worth more than a uniform pattern, and
+ * `mcode_work` is what someone reaches for first.
+ */
+export function toolName(action: string, profile: string | null): string {
+	if (profile === null) return action;
+	const suffix = action.startsWith(`${TOOL_FAMILY}_`) ? action.slice(TOOL_FAMILY.length + 1) : "";
+	return suffix === "" ? `${TOOL_FAMILY}_${profile}` : `${TOOL_FAMILY}_${profile}_${suffix}`;
+}
+
+/**
+ * Read a tool name back into the action and the profile it pins.
+ *
+ * `actions` is the set of tools that get a per-profile variant, and `profiles` the
+ * names to look for. Longest profile name first, so a profile called `work_2` is
+ * not read as profile `work` calling a `2_reply` that does not exist. Only a name
+ * that resolves to a real action and a real profile resolves at all — anything else
+ * is an unknown tool, which is what it was before profiles existed.
+ */
+export function resolveToolTarget(name: string, actions: string[], profiles: string[]): ToolTarget | null {
+	if (!name.startsWith(`${TOOL_FAMILY}_`) && name !== TOOL_FAMILY) return null;
+	if (actions.includes(name)) return { action: name, profile: null };
+
+	const rest = name === TOOL_FAMILY ? "" : name.slice(TOOL_FAMILY.length + 1);
+	if (rest === "") return null;
+
+	const byLength = [...profiles].sort((left, right) => right.length - left.length);
+	for (const profile of byLength) {
+		if (rest === profile) return { action: TOOL_FAMILY, profile };
+		if (!rest.startsWith(`${profile}_`)) continue;
+		const action = `${TOOL_FAMILY}_${rest.slice(profile.length + 1)}`;
+		if (actions.includes(action)) return { action, profile };
+	}
+	return null;
+}
+
+/**
+ * The profile one call runs under: the one its own tool name pins it to, or the
+ * session's recorded profile, or the server default.
+ *
+ * A tool name is settled before any argument is read, so the account cannot be
+ * changed by what a caller sends — which is the whole reason it moved out of the
+ * arguments. A bad stored name is still refused rather than guessed at, or a
+ * corrupt record would resolve to whichever account the server now defaults to.
+ */
+export function callProfile(target: ToolTarget, known?: string | undefined): string | null {
+	if (target.profile !== null) return target.profile;
+	return profileForCall(undefined, known);
+}
+
+/** Profile names a caller can address right now. */
+export function selectableProfiles(env: NodeJS.ProcessEnv = process.env): string[] {
+	const names = new Set(
+		listProfiles(env).flatMap((found) => (found.name === DEFAULT_PROFILE_NAME ? [] : [found.name])),
+	);
+	// A profile the server has been pointed at but not yet created still gets a tool.
+	// Otherwise setting the variable would produce a server whose default has no way
+	// to be addressed at all, and the tool that explains how to fix that is one call
+	// away — behind the tool that cannot work.
+	for (const candidate of [env[PROFILE_ENV_VAR], env[MCODE_PROFILE_ENV_VAR]]) {
+		const profile = normalizeProfileSelector(candidate);
+		if (profile !== null) names.add(profile);
+	}
+	return [...names].sort();
 }
 
 export function describeProfileState(profile: DiscoveredProfile): string {

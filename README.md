@@ -65,6 +65,7 @@ model sees.
 | Tool | Purpose |
 |---|---|
 | `mcode` | Start a session. Returns `[session: <id>]`, `[session-key: mcode:<id>]`, the result, and stats. |
+| `mcode_<profile>`, `mcode_<profile>_reply`, … | The same tools, pinned to a named account. One set per profile, so several accounts are live at once. |
 | `mcode_reply` | Continue a finished or interrupted session — including one killed by a timeout. |
 | `mcode_models` | List the models this installation can actually run, from the session catalog. |
 | `mcode_context` | Read a session's context window, budget and per-component breakdown. |
@@ -87,22 +88,35 @@ model sees.
 | `context_window` | Context window in tokens (M3 / M3.1 advertise `512000` and `1000000`; the latter is marked `higher_usage`). See the note below. |
 | `transport` | `acp` (default) or `print`. Usually omit. |
 | `timeout_ms` | Wall clock for this run. Off unless you set it. Print also forwards `--timeout <N>ms`. |
-| `profile` | Named auth profile. See the section below. On `mcode_reply`, `mcode_history` and `mcode_context` it defaults to the profile the session was started under. |
 
-### `profile`
+### Profiles
 
-**You will not see this section's argument or `mcode_profiles` at all unless a
-profile is in play.** They appear only when the server has been pointed at a
-profile (`MCODE_MCP_PROFILE` / `MINIMAX_PROFILE`) or one exists on disk. On a
-machine with neither — which includes everyone on a MiniMax Code that has never
-heard of a profile — the tool list and every argument schema are exactly what they
-were before this existed, so there is nothing new to be puzzled by and no argument
-that can only fail. Signing a profile in makes them appear without restarting the
-server.
+**The account is the tool's name, not an argument.** There is no `profile`
+parameter. For a profile called `work` you get `mcode_work`, `mcode_work_reply`,
+`mcode_work_models`, `mcode_work_context` and `mcode_work_history`; the untargeted
+`mcode` and friends stay on whatever the launch parameter selected.
 
-A `profile` argument that arrives anyway is still honoured. Hiding it from the
-schema is a statement about what this machine can do, not a vote on whether the
-caller knows better.
+```js
+mcode_work({ prompt: "…" })        // this task runs on the `work` account
+mcode_personal({ prompt: "…" })    // and this one on `personal`, at the same time
+```
+
+That is what lets several accounts be live in one agent at once: they are separate
+tools, so a model chooses the account by choosing what to call, and the choice
+survives being retried, forwarded, or read back out of a transcript. An argument
+cannot do that — one tool is one account per call, and every call site has to carry
+the choice.
+
+**You will not see any of it unless a profile is in play.** The per-profile tools
+and `mcode_profiles` appear only when the server has been pointed at a profile
+(`MCODE_MCP_PROFILE` / `MINIMAX_PROFILE`) or one exists on disk. On a machine with
+neither — which includes everyone on a MiniMax Code that has never heard of a
+profile — the tool list and every argument schema are exactly what they were in
+0.2.0, so there is nothing new to be puzzled by. Signing a profile in makes the
+tools appear without restarting the server.
+
+Asking for an account that does not exist is an unknown tool, not a run: a name
+only resolves to a real profile, so there is no path from a typo to a directory.
 
 A profile is a separate MiniMax account with its own data directory —
 `~/.minimax` for the default one, `~/.minimax-<name>` for a named one — holding
@@ -118,8 +132,9 @@ mcode({ prompt: "…", profile: "work" }) // a task on the `work` account
 
 Names must be 1–64 letters, numbers, dots, underscores or hyphens, starting and
 ending with a letter or number — a name becomes a directory segment under your
-home, so `../../etc` is refused rather than sanitised. `default` means the
-default profile explicitly; it does not name a `~/.minimax-default` account.
+home, so `../../etc` is refused rather than sanitised. Because the name is spliced
+into a tool name, a profile containing `_` is read back by the longest match first,
+so `work_2` and `work` can both exist.
 
 **The server's default** is `MCODE_MCP_PROFILE`, falling back to mcode's own
 `MINIMAX_PROFILE` if that is set and ours is not. A malformed value makes the

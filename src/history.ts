@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { closeSync, fstatSync, openSync, readSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { asRecord } from "./parse.ts";
-import { DEFAULT_PROFILE_NAME, dataDirForProfile, profileDirExists, profileForCall } from "./profile.ts";
+import { callProfile, DEFAULT_PROFILE_NAME, dataDirForProfile, profileDirExists, type ToolTarget } from "./profile.ts";
 import { getSession } from "./sessions.ts";
 import { expectedTranscript, findTranscript, statKey, storeRoot } from "./transcript.ts";
 import { getRun } from "./transport/registry.ts";
@@ -572,7 +572,7 @@ export function readHistoryFile(opts: {
 	}
 }
 
-export function readMcodeHistory(input: Record<string, unknown>): HistoryPage | { error: string } {
+export function readMcodeHistory(input: Record<string, unknown>, target: ToolTarget): HistoryPage | { error: string } {
 	const args = parseHistoryArgs(input, "mcode_history");
 	if ("error" in args) return args;
 	const known = getSession(args.session);
@@ -588,7 +588,7 @@ export function readMcodeHistory(input: Record<string, unknown>): HistoryPage | 
 	// recovers a transcript written before this server knew about profiles.
 	let profile: string | null;
 	try {
-		profile = profileForCall(input.profile, known?.profile);
+		profile = callProfile(target, known?.profile);
 		// The same guard the spawning tools use. Without it a mistyped profile would
 		// report "transcript not written yet" for a session that plainly has one,
 		// which reads as a missing file rather than a wrong name.

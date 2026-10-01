@@ -25,6 +25,7 @@ import {
 	callMcodeRunning,
 	callMcodeSend,
 	callMcodeSessions,
+	resolveCall,
 	toolDefinitions,
 	toolResult,
 } from "./tools.ts";
@@ -70,16 +71,33 @@ async function dispatchTool(
 	args: Record<string, unknown>,
 	ctx: CallContext,
 ): Promise<ToolResult | null> {
-	if (name === "mcode") return callMcode(args, ctx);
-	if (name === "mcode_reply") return callMcodeReply(args, ctx);
-	if (name === "mcode_models") return callMcodeModels(args, ctx);
-	if (name === "mcode_context") return callMcodeContext(args, ctx);
-	if (name === "mcode_send") return callMcodeSend(args);
-	if (name === "mcode_running") return callMcodeRunning();
-	if (name === "mcode_sessions") return callMcodeSessions();
-	if (name === "mcode_history") return callMcodeHistory(args);
-	if (name === "mcode_profiles") return callMcodeProfiles();
-	return null;
+	// The name carries the account: `mcode` is the server's default, `mcode_work`
+	// and `mcode_work_reply` are pinned to a named profile. Resolved first, so no
+	// argument can redirect a call to another account.
+	const target = resolveCall(String(name));
+	if (target === null) return null;
+	switch (target.action) {
+		case "mcode":
+			return callMcode(args, ctx, target);
+		case "mcode_reply":
+			return callMcodeReply(args, ctx, target);
+		case "mcode_models":
+			return callMcodeModels(args, ctx, target);
+		case "mcode_context":
+			return callMcodeContext(args, ctx, target);
+		case "mcode_send":
+			return callMcodeSend(args);
+		case "mcode_running":
+			return callMcodeRunning();
+		case "mcode_sessions":
+			return callMcodeSessions();
+		case "mcode_history":
+			return callMcodeHistory(args, target);
+		case "mcode_profiles":
+			return callMcodeProfiles();
+		default:
+			return null;
+	}
 }
 
 function asRecordParam(value: unknown): Record<string, unknown> {
