@@ -3,7 +3,7 @@
 	"publishConfig": {
 		"access": "public"
 	},
-	"version": "0.3.1",
+	"version": "0.4.0",
 	"description": "MCP server that delegates coding tasks to your locally installed MiniMax Code CLI (mcode). Wraps the real mcode binary instead of bundling its own copy of the agent, so it inherits your MiniMax login, models and config.",
 	"type": "module",
 	"bin": {
