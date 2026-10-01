@@ -353,6 +353,105 @@ describe("argv", () => {
 		expect(profileArgs(null)).toEqual([]);
 		expect(printArgs(plan)).not.toContain("--profile");
 	});
+
+	it("emits no --profile at all when a plan somehow lacks one", () => {
+		// A bare `--profile` would make mcode read the *next* flag as the profile
+		// name, so a plan that forgot the field would fail with "Invalid profile
+		// name --permission" instead of running normally. The wire is built here, so
+		// it is defended here.
+		const incomplete = { ...plan };
+		delete (incomplete as { profile?: string | null }).profile;
+		expect(printArgs(incomplete)).toEqual(["exec", "--output-format", "stream-json", "--cwd", "/tmp", "--", "hello"]);
+		expect(profileArgs(undefined)).toEqual([]);
+		expect(profileArgs("")).toEqual([]);
+	});
+});
+
+describe("what is advertised", () => {
+	let ws: Workspace;
+	let client: Client | undefined;
+
+	beforeEach(() => {
+		// MINIMAX_DATA_DIR is cleared so the profile directories under this test's
+		// home are the only ones in play.
+		ws = makeWorkspace({ HOME: home, MINIMAX_DATA_DIR: "" });
+	});
+
+	afterEach(() => {
+		client?.close();
+		ws.cleanup();
+	});
+
+	async function names(env: Record<string, string> = {}): Promise<string[]> {
+		client = new Client({ ...ws.env, ...env }, ws.dir);
+		await client.handshake();
+		const list = await client.toolList();
+		client.close();
+		client = undefined;
+		return list.map((tool) => tool.name).sort();
+	}
+
+	async function propertiesOf(env: Record<string, string> = {}): Promise<Record<string, string[]>> {
+		client = new Client({ ...ws.env, ...env }, ws.dir);
+		await client.handshake();
+		const list = await client.toolList();
+		const out: Record<string, string[]> = {};
+		for (const tool of list) out[tool.name] = Object.keys(tool.inputSchema.properties ?? {});
+		client.close();
+		client = undefined;
+		return out;
+	}
+
+	const WITHOUT_PROFILES = [
+		"mcode",
+		"mcode_context",
+		"mcode_history",
+		"mcode_models",
+		"mcode_reply",
+		"mcode_running",
+		"mcode_send",
+		"mcode_sessions",
+	];
+
+	it("advertises nothing profile-related when there is no profile", async () => {
+		expect(await names()).toEqual(WITHOUT_PROFILES);
+		for (const [tool, properties] of Object.entries(await propertiesOf())) {
+			expect(properties, tool).not.toContain("profile");
+		}
+	});
+
+	it("advertises profiles once one exists on disk", async () => {
+		seedCredentials(join(home, ".minimax-work"));
+		expect(await names()).toEqual([...WITHOUT_PROFILES, "mcode_profiles"].sort());
+		const properties = await propertiesOf();
+		for (const tool of ["mcode", "mcode_reply", "mcode_models", "mcode_context", "mcode_history"]) {
+			expect(properties[tool], tool).toContain("profile");
+		}
+	});
+
+	it("advertises profiles when the server is pointed at one that does not exist yet", async () => {
+		// Otherwise the tool that explains how to add a profile would be hidden from
+		// exactly the user who needs to read it.
+		expect(await names({ MCODE_MCP_PROFILE: "work" })).toContain("mcode_profiles");
+		expect(await names({ MCODE_MCP_PROFILE: "", MINIMAX_PROFILE: "work" })).toContain("mcode_profiles");
+	});
+
+	it("still obeys a profile that arrives when nothing advertised it", async () => {
+		// A client that knows about the feature must not be second-guessed by what
+		// this machine happens to have. The schema is hidden, the behaviour is not.
+		seedCredentials(join(home, ".minimax-work"));
+		const argvLog = join(home, "argv.log");
+		client = new Client({ ...ws.env, FAKE_ARGV_LOG: argvLog }, ws.dir);
+		await client.handshake();
+		const res = await client.tool("mcode", { prompt: "do it", profile: "work" });
+		expect(res.isError).toBe(false);
+		expect(res.text).toContain("[profile: work]");
+		expect(
+			readFakeRuns(argvLog)
+				.find((r) => r.argv[0] === "acp")
+				?.argv.slice(0, 3),
+		).toEqual(["acp", "--profile", "work"]);
+	});
 });
 
 describe("through the server", () => {

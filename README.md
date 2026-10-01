@@ -91,6 +91,19 @@ model sees.
 
 ### `profile`
 
+**You will not see this section's argument or `mcode_profiles` at all unless a
+profile is in play.** They appear only when the server has been pointed at a
+profile (`MCODE_MCP_PROFILE` / `MINIMAX_PROFILE`) or one exists on disk. On a
+machine with neither — which includes everyone on a MiniMax Code that has never
+heard of a profile — the tool list and every argument schema are exactly what they
+were before this existed, so there is nothing new to be puzzled by and no argument
+that can only fail. Signing a profile in makes them appear without restarting the
+server.
+
+A `profile` argument that arrives anyway is still honoured. Hiding it from the
+schema is a statement about what this machine can do, not a vote on whether the
+caller knows better.
+
 A profile is a separate MiniMax account with its own data directory —
 `~/.minimax` for the default one, `~/.minimax-<name>` for a named one — holding
 its own credentials, sessions and settings. It is mcode's own feature; this

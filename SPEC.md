@@ -87,6 +87,18 @@ Names are validated, never repaired: 1–64 chars, alphanumeric at both ends, an
 
 Server default: `MCODE_MCP_PROFILE`, then `MINIMAX_PROFILE`. A malformed value stops startup — falling back would bill the wrong account.
 
+### Advertising
+
+`mcode_profiles` and the `profile` argument are advertised only when a profile can
+change what a call does: the server is pointed at one, or one exists on disk.
+Otherwise the tool list and every schema are byte-for-byte what they were before
+this feature, which is the point — a caller on a MiniMax Code without profile
+support meets nothing new and no argument that can only fail. Recomputed per
+`tools/list`, so signing a profile in while the server runs makes it appear.
+
+Advertising is not permission. A `profile` argument that arrives regardless of the
+schema is resolved and obeyed.
+
 ### The one place this adapter does not just pass mcode through
 
 `mcode_profiles` lists profiles by walking the home directory rather than by running `mcode profile list --json`. The CLI command costs a cold start per call and exists only on a build that has profiles, and the server has to work against one that does not. The cost is that the credential layout it inspects — `auth/**/auth.json` for OAuth, an `apiKey:` line in `config.yaml` for a Token Plan key, `auth-state.json` for a sign-in in flight — is a copy of an implementation detail. Both credential kinds are reported, because calling an API-key profile "signed out" would send the agent away from a working account. A directory is only listed when it actually holds data, which is what keeps the installer prefix `~/.minimax-code` from being offered as a profile named `code`.

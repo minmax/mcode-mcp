@@ -257,9 +257,13 @@ export function profileForCall(
 	return serverProfile(env);
 }
 
-/** `--profile <name>`, or nothing for the default profile. */
-export function profileArgs(profile: string | null): string[] {
-	return profile === null ? [] : ["--profile", profile];
+export function profileArgs(profile: string | null | undefined): string[] {
+	// Anything that is not a non-empty string means "no profile", rather than being
+	// passed through. This builds the wire, and a malformed wire is the worst outcome
+	// available: a bare `--profile` with nothing after it makes mcode read the *next*
+	// flag as the profile name, so a plan that somehow lacked one would fail with a
+	// baffling "Invalid profile name --permission" instead of running normally.
+	return typeof profile === "string" && profile !== "" ? ["--profile", profile] : [];
 }
 
 /**
@@ -499,6 +503,25 @@ export function listProfiles(env: NodeJS.ProcessEnv = process.env): DiscoveredPr
  * it pending would tell the agent to go and sign in again for no reason. The
  * pending state is only reported when there is nothing usable to wait for.
  */
+/**
+ * Whether profiles are worth putting in front of the caller at all.
+ *
+ * A user on a build of MiniMax Code without profile support, who has never named a
+ * profile, should see the tool surface they had before this feature existed — not a
+ * parameter that can only fail and a tool that lists nothing. So the answer is only
+ * yes when a profile can actually change what a call does: the server has been
+ * pointed at one, or one exists on disk.
+ *
+ * This decides what is *advertised*, never what is *honoured*: a caller that passes
+ * `profile` is obeyed either way, because a client that knows about the feature
+ * should not be second-guessed by what this machine happens to have.
+ */
+export function profilesAvailable(env: NodeJS.ProcessEnv = process.env): boolean {
+	if ((env[PROFILE_ENV_VAR]?.trim() ?? "") !== "") return true;
+	if ((env[MCODE_PROFILE_ENV_VAR]?.trim() ?? "") !== "") return true;
+	return listProfiles(env).some((profile) => profile.name !== DEFAULT_PROFILE_NAME);
+}
+
 export function describeProfileState(profile: DiscoveredProfile): string {
 	if (profile.credentials === "none" && profile.pendingAuthorization) return "authorization pending";
 	if (profile.credentials === "oauth") return "signed in (OAuth)";

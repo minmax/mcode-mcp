@@ -43,6 +43,7 @@ import {
 	listProfiles,
 	profileDirExists,
 	profileForCall,
+	profilesAvailable,
 	serverProfile,
 } from "./profile.ts";
 import { getSession, listSessions, rememberSession, withSessionLock } from "./sessions.ts";
@@ -79,17 +80,19 @@ const LOCAL_LISTING = {
 	openWorldHint: false,
 } as const;
 
+/** Not shared: the `profile` description lives with the code that decides to advertise it. */
+const PROFILE_PROP = {
+	type: "string",
+	description:
+		"Named auth profile: its own MiniMax account, sessions and settings, in ~/.minimax-<name>. " +
+		"Omit to use this server's default (MCODE_MCP_PROFILE, else the default profile). 'default' " +
+		"means the default profile explicitly. A session keeps the profile it started under, so " +
+		"`mcode_reply` does not need it, and it may not be changed — a session id only names a " +
+		"conversation inside one account. Use mcode_profiles to list what exists and what is signed in; " +
+		"add one with `mcode login --profile <name>` in a terminal.",
+};
+
 const SHARED_PROPS = {
-	profile: {
-		type: "string",
-		description:
-			"Named auth profile: its own MiniMax account, sessions and settings, in ~/.minimax-<name>. " +
-			"Omit to use this server's default (MCODE_MCP_PROFILE, else the default profile). 'default' " +
-			"means the default profile explicitly. A session keeps the profile it started under, so " +
-			"`mcode_reply` does not need it, and it may not be changed — a session id only names a " +
-			"conversation inside one account. Use mcode_profiles to list what exists and what is signed in; " +
-			"add one with `mcode login --profile <name>` in a terminal.",
-	},
 	model: {
 		type: "string",
 		description:
@@ -145,7 +148,7 @@ const SHARED_PROPS = {
 	},
 } as const;
 
-export const TOOLS: ToolDefinition[] = [
+const TOOL_DEFINITIONS: ToolDefinition[] = [
 	{
 		name: "mcode",
 		description:
@@ -218,24 +221,10 @@ export const TOOLS: ToolDefinition[] = [
 					type: "string",
 					description: "Optional substring filter on provider or model id.",
 				},
-				profile: SHARED_PROPS.profile,
 			},
 			additionalProperties: false,
 		},
 		annotations: LIVE_LISTING,
-	},
-	{
-		name: "mcode_profiles",
-		description:
-			"List the MiniMax auth profiles on this machine, and which one this server uses by default. " +
-			"A profile is an isolated data directory (~/.minimax-<name>) with its own account, sessions and " +
-			"settings, so several token plans can be kept side by side. Read the credential state before " +
-			"choosing one: a profile reported as 'signed out' or 'not created' has nothing to authenticate " +
-			"with, and running against it is how a task ends up charged to the wrong account. Starts no " +
-			"process and starts no task. Add one with `mcode login --profile <name>` in a terminal — login is " +
-			"interactive and has no headless equivalent.",
-		inputSchema: { type: "object", properties: {}, additionalProperties: false },
-		annotations: LOCAL_LISTING,
 	},
 	{
 		name: "mcode_context",
@@ -253,12 +242,6 @@ export const TOOLS: ToolDefinition[] = [
 				session: {
 					type: "string",
 					description: "Session id, as printed in the [session: <id>] prefix of an mcode answer.",
-				},
-				profile: {
-					...SHARED_PROPS.profile,
-					description:
-						"Defaults to the profile the session was started under, which is almost always what " +
-						"you want — pass it only to read a session recorded under another profile.",
 				},
 			},
 			required: ["session"],
@@ -351,12 +334,6 @@ export const TOOLS: ToolDefinition[] = [
 					minimum: 1,
 					description: `Max characters per item text (default ${HISTORY_DEFAULT_MAX_CHARS}, max ${HISTORY_MAX_MAX_CHARS}).`,
 				},
-				profile: {
-					...SHARED_PROPS.profile,
-					description:
-						"Defaults to the profile the session was started under. The page reports which profile " +
-						"it actually read, and a cursor from one profile is refused in another.",
-				},
 				include_tools: {
 					type: "boolean",
 					description: "Include tool calls/results (default true). Filtered tool lines still advance the cursor.",
@@ -368,6 +345,54 @@ export const TOOLS: ToolDefinition[] = [
 		annotations: LOCAL_LISTING,
 	},
 ];
+
+/** The tool that only exists to describe profiles, kept out of the array above. */
+const PROFILES_TOOL: ToolDefinition = {
+	name: "mcode_profiles",
+	description:
+		"List the MiniMax auth profiles on this machine, and which one this server uses by default. " +
+		"A profile is an isolated data directory (~/.minimax-<name>) with its own account, sessions and " +
+		"settings, so several token plans can be kept side by side. Read the credential state before " +
+		"choosing one: a profile reported as 'signed out' or 'not created' has nothing to authenticate " +
+		"with, and running against it is how a task ends up charged to the wrong account. Starts no " +
+		"process and starts no task. Add one with `mcode login --profile <name>` in a terminal — login is " +
+		"interactive and has no headless equivalent.",
+	inputSchema: { type: "object", properties: {}, additionalProperties: false },
+	annotations: LOCAL_LISTING,
+};
+
+const PROFILE_TOOL_NAMES = new Set(["mcode", "mcode_reply", "mcode_models", "mcode_context", "mcode_history"]);
+
+/**
+ * The tools this server advertises.
+ *
+ * With no profile in play this is byte-for-byte the list from before profiles
+ * existed: no `mcode_profiles`, and no `profile` property on any schema. A user
+ * whose MiniMax Code has no notion of a profile then sees nothing new to be
+ * puzzled by and no argument that can only fail.
+ *
+ * Recomputed per `tools/list` rather than once at import, so signing a profile in
+ * while the server is already running makes it appear without a restart.
+ *
+ * This is only about what is advertised. A `profile` argument that arrives anyway
+ * is still resolved and obeyed: the caller's knowledge of the feature outranks this
+ * machine's.
+ */
+export function toolDefinitions(): ToolDefinition[] {
+	if (!profilesAvailable()) return TOOL_DEFINITIONS;
+	return TOOL_DEFINITIONS.map((tool) => {
+		if (!PROFILE_TOOL_NAMES.has(tool.name)) return tool;
+		const schema = tool.inputSchema as {
+			type: "object";
+			properties?: Record<string, unknown>;
+			required?: string[];
+		};
+		return {
+			...tool,
+			inputSchema: { ...schema, properties: { ...schema.properties, profile: PROFILE_PROP } },
+		};
+	}).concat(PROFILES_TOOL);
+}
 
 export function toolResult(text: string, isError = false): ToolResult {
 	return { content: [{ type: "text", text }], ...(isError ? { isError: true } : {}) };

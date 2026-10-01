@@ -2,6 +2,12 @@
 
 What changed in behaviour, in the order it shipped. Dates are publish dates from the registry.
 
+## Unreleased
+
+- **Profiles are advertised only when they can do something.** `mcode_profiles` and the `profile` argument appear only when the server has been pointed at a profile or one exists on disk. On a machine with neither — everyone on a MiniMax Code that has never heard of a profile — the tool list and every argument schema are byte-for-byte what they were in 0.2.0, verified by diffing `tools/list` against that release: no new tool, no new argument, and no argument that can only fail. Recomputed per `tools/list`, so signing a profile in while the server is already running makes it appear without a restart.
+- **A `profile` argument that arrives anyway is still honoured.** Hiding it from the schema says what this machine can do; it is not a vote on whether the caller knows better.
+- **`--profile` is never emitted without a name.** The argv builder treats anything that is not a non-empty string as "no profile". A bare `--profile` would make mcode read the *next* flag as the profile name, turning a plan that somehow lacked the field into a baffling `Invalid profile name --permission` instead of a normal run.
+
 ## 0.3.0 — 2026-10-01
 
 - **Named auth profiles.** `profile` on `mcode`, `mcode_reply`, `mcode_models`, `mcode_context` and `mcode_history` selects a MiniMax Code account — its own credentials, sessions and settings in `~/.minimax-<name>`. The flag is mcode's own `--profile <name>`, and this server resolves its paths with mcode's own arithmetic, so a run and the transcript read back afterwards cannot disagree about which account they used. Requires a MiniMax Code with profile support (their `feat/auth-profiles` line, 0.6.0-era); without one, naming a profile fails with mcode's own unknown-option error and the default path is untouched.

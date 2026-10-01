@@ -1,3 +1,5 @@
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Client, makeWorkspace, type Workspace } from "./helpers/client.ts";
 
@@ -29,22 +31,53 @@ describe("handshake", () => {
 		client.close();
 	});
 
-	it("exposes exactly its tools", async () => {
+	// Two shapes, deliberately. With no profile in play the surface is what it was
+	// before profiles existed; with one, the profile argument and its listing appear.
+	const WITHOUT_PROFILES = [
+		"mcode",
+		"mcode_context",
+		"mcode_history",
+		"mcode_models",
+		"mcode_reply",
+		"mcode_running",
+		"mcode_send",
+		"mcode_sessions",
+	];
+
+	it("exposes nothing profile-related when there is no profile", async () => {
+		// Someone on a build of MiniMax Code that has never heard of a profile meets
+		// no `mcode_profiles` listing nothing and no `profile` argument that can only
+		// fail. The surface is the pre-profile one, exactly.
 		const client = new Client(ws.env, ws.dir);
 		await client.handshake();
-		const list = await client.call("tools/list");
-		expect(list.result.tools.map((t: { name: string }) => t.name).sort()).toEqual([
-			"mcode",
-			"mcode_context",
-			"mcode_history",
-			"mcode_models",
-			"mcode_profiles",
-			"mcode_reply",
-			"mcode_running",
-			"mcode_send",
-			"mcode_sessions",
-		]);
+		const tools = await client.toolList();
+		expect(tools.map((t) => t.name).sort()).toEqual(WITHOUT_PROFILES);
+		for (const tool of tools) {
+			expect(Object.keys(tool.inputSchema.properties ?? {}), tool.name).not.toContain("profile");
+		}
 		client.close();
+	});
+
+	it("exposes the profile tools once a profile exists", async () => {
+		// MINIMAX_DATA_DIR is cleared because it outranks the profile: with it set,
+		// every profile resolves to that one directory and they stop being separate
+		// accounts, which is exactly what this feature must not pretend otherwise.
+		const withProfile = makeWorkspace({ MINIMAX_DATA_DIR: "" });
+		try {
+			mkdirSync(join(withProfile.home, ".minimax-work", "auth", "prod", "cn", "c1"), { recursive: true });
+			const client = new Client(withProfile.env, withProfile.dir);
+			await client.handshake();
+			const tools = await client.toolList();
+			expect(tools.map((t) => t.name).sort()).toEqual([...WITHOUT_PROFILES, "mcode_profiles"].sort());
+			const profiled = new Set(["mcode", "mcode_reply", "mcode_models", "mcode_context", "mcode_history"]);
+			for (const tool of tools) {
+				const has = Object.keys(tool.inputSchema.properties ?? {}).includes("profile");
+				expect(has, tool.name).toBe(profiled.has(tool.name));
+			}
+			client.close();
+		} finally {
+			withProfile.cleanup();
+		}
 	});
 });
 

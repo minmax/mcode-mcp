@@ -25,7 +25,7 @@ import {
 	callMcodeRunning,
 	callMcodeSend,
 	callMcodeSessions,
-	TOOLS,
+	toolDefinitions,
 	toolResult,
 } from "./tools.ts";
 import type { CallContext, CancelToken, JsonRpcId, JsonRpcMessage, ToolResult } from "./types.ts";
@@ -157,7 +157,7 @@ async function handle(msg: JsonRpcMessage): Promise<void> {
 			return;
 
 		case "tools/list":
-			if (hasId) reply(id, { tools: TOOLS });
+			if (hasId) reply(id, { tools: toolDefinitions() });
 			return;
 
 		case "tools/call": {

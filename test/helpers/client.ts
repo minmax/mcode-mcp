@@ -2,7 +2,7 @@
 // mcode binary the tests point it at.
 
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -91,6 +91,12 @@ export class Client {
 		return init;
 	}
 
+	/** The advertised tool surface, with each schema's declared properties. */
+	async toolList(): Promise<{ name: string; inputSchema: { properties?: Record<string, unknown> } }[]> {
+		const res = await this.call("tools/list");
+		return res.result?.tools ?? [];
+	}
+
 	async tool(name: string, args: unknown = {}, meta?: unknown): Promise<{ text: string; isError: boolean }> {
 		const params: Record<string, unknown> = { name, arguments: args };
 		if (meta !== undefined) params._meta = meta;
@@ -146,6 +152,8 @@ export function readFakeRuns(path: string): FakeRun[] {
 
 export interface Workspace {
 	dir: string;
+	/** Empty home directory, so the developer's own profiles cannot reach a test. */
+	home: string;
 	bin: string;
 	env: Record<string, string>;
 	stateFile: string;
@@ -154,16 +162,23 @@ export interface Workspace {
 
 export function makeWorkspace(env: Record<string, string> = {}): Workspace {
 	const dir = mkdtempSync(join(tmpdir(), "mcode-mcp-test-"));
+	const home = join(dir, "home");
+	mkdirSync(home, { recursive: true });
 	const bin = makeFakeBin(dir);
 	const stateFile = join(dir, "sessions.json");
 	return {
 		dir,
+		home,
 		bin,
 		stateFile,
 		env: {
 			MCODE_MCP_BIN: bin,
 			MCODE_MCP_STATE: stateFile,
 			MINIMAX_DATA_DIR: dir,
+			// An isolated home by default: the server discovers profiles under it, and
+			// without this a developer's own ~/.minimax-* would decide what a test
+			// sees. Pass `HOME` in `env` to override.
+			HOME: home,
 			...env,
 		},
 		cleanup: () => rmSync(dir, { recursive: true, force: true }),
